@@ -18,14 +18,8 @@
 
 #include "qemu-common.h"
 
-
 #define ACPI_PCIHP_ADDR         0xae00
 #define PCI_EJ_BASE             0x0008
-
-typedef struct QPCIBusPC
-{
-    QPCIBus bus;
-} QPCIBusPC;
 
 static uint8_t qpci_pc_pio_readb(QPCIBus *bus, uint32_t addr)
 {
@@ -115,11 +109,22 @@ static void qpci_pc_config_writel(QPCIBus *bus, int devfn, uint8_t offset, uint3
     outl(0xcfc, value);
 }
 
-QPCIBus *qpci_new_pc(QTestState *qts, QGuestAllocator *alloc)
+static void *qpci_get_driver(void *obj, const char *interface)
 {
-    QPCIBusPC *ret = g_new0(QPCIBusPC, 1);
+    QPCIBusPC *qpci = obj;
+    if (!g_strcmp0(interface, "pci-bus")) {
+        return &qpci->bus;
+    }
+    fprintf(stderr, "%s not present in pci-bus-pc\n", interface);
+    g_assert_not_reached();
+}
 
+void qpci_init_pc(QPCIBusPC *ret, QTestState *qts, QGuestAllocator *alloc)
+{
     assert(qts);
+
+    /* tests can use pci-bus */
+    ret->bus.has_buggy_msi = FALSE;
 
     ret->bus.pio_readb = qpci_pc_pio_readb;
     ret->bus.pio_readw = qpci_pc_pio_readw;
@@ -147,12 +152,25 @@ QPCIBus *qpci_new_pc(QTestState *qts, QGuestAllocator *alloc)
     ret->bus.mmio_alloc_ptr = 0xE0000000;
     ret->bus.mmio_limit = 0x100000000ULL;
 
-    return &ret->bus;
+    ret->obj.get_driver = qpci_get_driver;
+}
+
+QPCIBus *qpci_new_pc(QTestState *qts, QGuestAllocator *alloc)
+{
+    QPCIBusPC *qpci = g_new0(QPCIBusPC, 1);
+    qpci_init_pc(qpci, qts, alloc);
+
+    return &qpci->bus;
 }
 
 void qpci_free_pc(QPCIBus *bus)
 {
-    QPCIBusPC *s = container_of(bus, QPCIBusPC, bus);
+    QPCIBusPC *s;
+
+    if (!bus) {
+        return;
+    }
+    s = container_of(bus, QPCIBusPC, bus);
 
     g_free(s);
 }
@@ -176,3 +194,11 @@ void qpci_unplug_acpi_device_test(const char *id, uint8_t slot)
 
     qmp_eventwait("DEVICE_DELETED");
 }
+
+static void qpci_pc_register_nodes(void)
+{
+    qos_node_create_driver("pci-bus-pc", NULL);
+    qos_node_produces("pci-bus-pc", "pci-bus");
+}
+
+libqos_init(qpci_pc_register_nodes);
