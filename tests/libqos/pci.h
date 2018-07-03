@@ -70,6 +70,7 @@ void qpci_device_foreach(QPCIBus *bus, int vendor_id, int device_id,
                          void (*func)(QPCIDevice *dev, int devfn, void *data),
                          void *data);
 QPCIDevice *qpci_device_find(QPCIBus *bus, int devfn);
+void qpci_device_init(QPCIDevice *dev, QPCIBus *bus, int devfn);
 
 void qpci_device_enable(QPCIDevice *dev);
 uint8_t qpci_find_capability(QPCIDevice *dev, uint8_t id);
