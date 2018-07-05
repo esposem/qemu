@@ -403,6 +403,92 @@ static void test_double_edge(void)
     qos_graph_destroy();
 }
 
+static void check_machine_host_pci(void)
+{
+    QOSGraphNode *machine = qos_graph_get_node("x86_64/pc");
+    g_assert_nonnull(machine);
+    QOSGraphObject *machineobj = machine->u.machine.constructor();
+    g_assert_nonnull(machineobj);
+    g_assert_nonnull(machineobj->get_device);
+
+    QOSGraphNode *host = qos_graph_get_node("i440FX_host");
+    g_assert_nonnull(host);
+    QOSGraphObject *hostobj = machineobj->get_device(machineobj, "i440FX_host");
+    g_assert_null(host->u.driver.constructor);
+    g_assert_nonnull(hostobj);
+    g_assert_nonnull(hostobj->get_device);
+
+    QOSGraphNode *pci = qos_graph_get_node("pci-bus-pc");
+    g_assert_nonnull(pci);
+    QOSGraphObject *pciobj = hostobj->get_device(hostobj, "pci-bus-pc");
+    g_assert_null(pci->u.driver.constructor);
+    g_assert_nonnull(pciobj);
+    g_assert_nonnull(pciobj->get_driver);
+
+    qos_destroy_object(pciobj);
+    qos_destroy_object(hostobj);
+    qos_destroy_object(machineobj);
+}
+
+static void check_machine_mm(void)
+{
+    QOSGraphNode *machine = qos_graph_get_node("arm/raspi2");
+    g_assert_nonnull(machine);
+    QOSGraphObject *machineobj = machine->u.machine.constructor();
+    g_assert_nonnull(machineobj);
+    g_assert_nonnull(machineobj->get_device);
+
+    QOSGraphNode *mm = qos_graph_get_node("generic-sdhci");
+    g_assert_nonnull(mm);
+    QOSGraphObject *mmobj = machineobj->get_device(machineobj, "generic-sdhci");
+    g_assert_null(mm->u.driver.constructor);
+    g_assert_nonnull(mmobj);
+    g_assert_nonnull(mmobj->get_driver);
+
+    QOSGraphNode *interface = qos_graph_get_node("sdhci");
+    g_assert_nonnull(interface);
+    QOSGraphObject *intobj = mmobj->get_driver(mmobj, "sdhci");
+    g_assert_null(interface->u.driver.constructor);
+    g_assert_nonnull(intobj);
+    g_assert_null(intobj->get_driver);
+    g_assert_null(intobj->get_device);
+
+    qos_destroy_object(intobj);
+    qos_destroy_object(mmobj);
+    qos_destroy_object(machineobj);
+}
+
+static void check_sdhci_pci(void)
+{
+    QOSGraphNode *pci = qos_graph_get_node("sdhci-pci");
+    g_assert_nonnull(pci);
+    QOSGraphObject *pciobj = pci->u.driver.constructor(NULL, NULL);
+    g_assert_nonnull(pciobj);
+    g_assert_nonnull(pciobj->get_driver);
+
+    QOSGraphNode *interface = qos_graph_get_node("sdhci");
+    g_assert_nonnull(interface);
+    QOSGraphObject *intobj = pciobj->get_driver(pciobj, "sdhci");
+    g_assert_null(interface->u.driver.constructor);
+    g_assert_nonnull(intobj);
+    g_assert_null(intobj->get_driver);
+    g_assert_null(intobj->get_device);
+
+    qos_destroy_object(intobj);
+    qos_destroy_object(pciobj);
+}
+
+static void test_actual_graph(void)
+{
+    qos_graph_init();
+    global_qtest = qtest_start("-M none");
+    module_call_init(MODULE_INIT_LIBQOS);
+    g_test_add_func("/qgraph/arm/raspi2/check_machine_mm", check_machine_mm);
+    g_test_add_func("/qgraph/x86_64/pc/check_machine_host_pci",
+                        check_machine_host_pci);
+    g_test_add_func("/qgraph/check_sdhci_pci", check_sdhci_pci);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -441,6 +527,12 @@ int main(int argc, char **argv)
                         test_two_test_same_interface);
     g_test_add_func("/qgraph/test_double_edge", test_double_edge);
 
+    /* actual graph tests */
+    g_test_add_func("/qgraph/test_actual_graph", test_actual_graph);
+
     g_test_run();
+
+    qos_graph_destroy();
+    qtest_end();
     return 0;
 }
