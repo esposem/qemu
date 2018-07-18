@@ -10,29 +10,29 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 #include "libqos/virtio.h"
+#include "libqos/qgraph.h"
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void console_nop(void)
+static void console_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
-    global_qtest = qtest_startf("-device virtio-serial-%s,id=vser0 "
-                                "-device virtconsole,bus=vser0.0",
-                                qvirtio_get_dev_type());
-    qtest_end();
+    /* no operation */
 }
 
-static void serialport_nop(void)
+static void serialport_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
-    global_qtest = qtest_startf("-device virtio-serial-%s,id=vser0 "
-                                "-device virtserialport,bus=vser0.0",
-                                qvirtio_get_dev_type());
-    qtest_end();
+    /* no operation */
 }
 
-int main(int argc, char **argv)
+static void register_virtio_console_test(void)
 {
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/virtio/console/nop", console_nop);
-    qtest_add_func("/virtio/serialport/nop", serialport_nop);
+    QOSGraphTestOptions opts = { };
+    QOSGraphEdgeOptions *edge_opts = &opts.edge;
 
-    return g_test_run();
+    edge_opts->before_cmd_line = "-device virtconsole,bus=vser0.0";
+    qos_add_test("console-nop", "virtio-serial", console_nop, &opts);
+
+    edge_opts->before_cmd_line = "-device virtserialport,bus=vser0.0";
+    qos_add_test("serialport-nop", "virtio-serial", serialport_nop, &opts);
 }
+
+libqos_init(register_virtio_console_test);
