@@ -41,6 +41,6 @@ typedef struct QVirtioMMIODevice {
 
 extern const QVirtioBus qvirtio_mmio;
 
-QVirtioMMIODevice *qvirtio_mmio_init_device(uint64_t addr, uint32_t page_size);
+QVirtioMMIODevice *qvirtio_mmio_device_new(uint64_t addr, uint32_t page_size);
 
 #endif

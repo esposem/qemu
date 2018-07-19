@@ -187,7 +187,7 @@ const QVirtioBus qvirtio_mmio = {
     .virtqueue_kick = qvirtio_mmio_virtqueue_kick,
 };
 
-QVirtioMMIODevice *qvirtio_mmio_init_device(uint64_t addr, uint32_t page_size)
+QVirtioMMIODevice *qvirtio_mmio_device_new(uint64_t addr, uint32_t page_size)
 {
     QVirtioMMIODevice *dev;
     uint32_t magic;
