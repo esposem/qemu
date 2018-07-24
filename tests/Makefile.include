@@ -770,8 +770,11 @@ libqgraph-machines-obj-y += tests/libqos/raspi2-machine.o
 libqgraph-machines-obj-y += tests/libqos/ppc64_pseries-machine.o
 libqgraph-machines-obj-y += tests/libqos/virt-machine.o
 
+libqgraph-virtio-obj-y = tests/libqos/virtio-serial.o
+
 libqgraph-pci-obj-y = $(libqos-virtio-obj-y)
 libqgraph-pci-obj-y += $(libqgraph-machines-obj-y)
+libqgraph-pci-obj-y += $(libqgraph-virtio-obj-y)
 libqgraph-pci-obj-y += tests/libqos/sdhci.o
 libqgraph-pci-obj-y += tests/libqos/e1000e.o
 
