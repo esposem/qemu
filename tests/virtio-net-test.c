@@ -45,9 +45,7 @@ static QVirtioPCIDevice *virtio_net_pci_init(QPCIBus *bus, int slot)
     g_assert_cmphex(dev->vdev.device_type, ==, VIRTIO_ID_NET);
 
     qvirtio_pci_device_enable(dev);
-    qvirtio_reset(&dev->vdev);
-    qvirtio_set_acknowledge(&dev->vdev);
-    qvirtio_set_driver(&dev->vdev);
+    qvirtio_start_device(&dev->vdev);
 
     return dev;
 }
@@ -80,8 +78,6 @@ static void driver_init(QVirtioDevice *dev)
                             (1u << VIRTIO_RING_F_INDIRECT_DESC) |
                             (1u << VIRTIO_RING_F_EVENT_IDX));
     qvirtio_set_features(dev, features);
-
-    qvirtio_set_driver_ok(dev);
 }
 
 static void rx_test(QVirtioDevice *dev,

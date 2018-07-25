@@ -365,3 +365,11 @@ const char *qvirtio_get_dev_type(void)
         return "pci";
     }
 }
+
+void qvirtio_start_device(QVirtioDevice *vdev)
+{
+    qvirtio_reset(vdev);
+    qvirtio_set_acknowledge(vdev);
+    qvirtio_set_driver(vdev);
+    qvirtio_set_driver_ok(vdev);
+}

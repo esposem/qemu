@@ -112,10 +112,7 @@ static QVirtioPCIDevice *virtio_blk_pci_init(QPCIBus *bus, int slot)
     g_assert_cmphex(dev->pdev->devfn, ==, ((slot << 3) | PCI_FN));
 
     qvirtio_pci_device_enable(dev);
-    qvirtio_reset(&dev->vdev);
-    qvirtio_set_acknowledge(&dev->vdev);
-    qvirtio_set_driver(&dev->vdev);
-
+    qvirtio_start_device(&dev->vdev);
     return dev;
 }
 
@@ -173,8 +170,6 @@ static void test_basic(QVirtioDevice *dev, QGuestAllocator *alloc,
                     (1u << VIRTIO_RING_F_EVENT_IDX) |
                     (1u << VIRTIO_BLK_F_SCSI));
     qvirtio_set_features(dev, features);
-
-    qvirtio_set_driver_ok(dev);
 
     /* Write and read with 3 descriptor layout */
     /* Write request */
@@ -329,7 +324,6 @@ static void pci_indirect(void)
     qvirtio_set_features(&dev->vdev, features);
 
     vqpci = (QVirtQueuePCI *)qvirtqueue_setup(&dev->vdev, qs->alloc, 0);
-    qvirtio_set_driver_ok(&dev->vdev);
 
     /* Write request */
     req.type = VIRTIO_BLK_T_OUT;
@@ -407,8 +401,6 @@ static void pci_config(void)
     capacity = qvirtio_config_readq(&dev->vdev, 0);
     g_assert_cmpint(capacity, ==, TEST_IMAGE_SIZE / 512);
 
-    qvirtio_set_driver_ok(&dev->vdev);
-
     qmp_discard_response("{ 'execute': 'block_resize', "
                          " 'arguments': { 'device': 'drive0', "
                          " 'size': %d } }", n_size);
@@ -456,8 +448,6 @@ static void pci_msix(void)
 
     vqpci = (QVirtQueuePCI *)qvirtqueue_setup(&dev->vdev, qs->alloc, 0);
     qvirtqueue_pci_msix_setup(dev, vqpci, qs->alloc, 1);
-
-    qvirtio_set_driver_ok(&dev->vdev);
 
     qmp_discard_response("{ 'execute': 'block_resize', "
                          " 'arguments': { 'device': 'drive0', "
@@ -564,8 +554,6 @@ static void pci_idx(void)
 
     vqpci = (QVirtQueuePCI *)qvirtqueue_setup(&dev->vdev, qs->alloc, 0);
     qvirtqueue_pci_msix_setup(dev, vqpci, qs->alloc, 1);
-
-    qvirtio_set_driver_ok(&dev->vdev);
 
     /* Write request */
     req.type = VIRTIO_BLK_T_OUT;
@@ -715,9 +703,7 @@ static void mmio_basic(void)
     g_assert(dev != NULL);
     g_assert_cmphex(dev->vdev.device_type, ==, VIRTIO_ID_BLOCK);
 
-    qvirtio_reset(&dev->vdev);
-    qvirtio_set_acknowledge(&dev->vdev);
-    qvirtio_set_driver(&dev->vdev);
+    qvirtio_start_device(&dev->vdev);
 
     alloc = generic_alloc_init(MMIO_RAM_ADDR, MMIO_RAM_SIZE, MMIO_PAGE_SIZE);
     vq = qvirtqueue_setup(&dev->vdev, alloc, 0);
