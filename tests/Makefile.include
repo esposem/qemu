@@ -769,6 +769,7 @@ libqgraph-machines-obj-y += tests/libqos/virt-machine.o
 libqgraph-virtio-obj-y = tests/libqos/virtio-serial.o
 libqgraph-virtio-obj-y += tests/libqos/virtio-9p.o
 libqgraph-virtio-obj-y += tests/libqos/virtio-balloon.o
+libqgraph-virtio-obj-y += tests/libqos/virtio-rng.o
 
 libqgraph-pci-obj-y = $(libqos-virtio-obj-y)
 libqgraph-pci-obj-y += $(libqgraph-machines-obj-y)
