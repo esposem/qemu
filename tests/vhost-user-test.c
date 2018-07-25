@@ -198,9 +198,7 @@ static void init_virtio_dev(TestServer *s, uint32_t features_mask)
     g_assert_nonnull(s->dev);
 
     qvirtio_pci_device_enable(s->dev);
-    qvirtio_reset(&s->dev->vdev);
-    qvirtio_set_acknowledge(&s->dev->vdev);
-    qvirtio_set_driver(&s->dev->vdev);
+    qvirtio_start_device(&s->dev->vdev);
 
     s->alloc = pc_alloc_init(global_qtest);
 
