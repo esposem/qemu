@@ -9,25 +9,17 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
-#include "libqos/virtio.h"
+#include "libqos/qgraph.h"
+#include "libqos/virtio-balloon.h"
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void balloon_nop(void)
+static void balloon_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
 }
 
-int main(int argc, char **argv)
+static void virtio_balloon_test(void)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/virtio/balloon/nop", balloon_nop);
-
-    global_qtest = qtest_startf("-device virtio-balloon-%s",
-                                qvirtio_get_dev_type());
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    qos_add_test("balloon-nop", "virtio-balloon", balloon_nop, NULL);
 }
+
+libqos_init(virtio_balloon_test);
