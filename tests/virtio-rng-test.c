@@ -9,16 +9,17 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
-#include "libqos/pci.h"
+#include "libqos/qgraph.h"
+#include "libqos/virtio-rng.h"
 
 #define PCI_SLOT_HP             0x06
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void pci_nop(void)
+static void nop(void *obj, void *data, QGuestAllocator *alloc)
 {
 }
 
-static void hotplug(void)
+static void rng_hotplug(void *obj, void *data, QGuestAllocator *alloc)
 {
     const char *arch = qtest_get_arch();
 
@@ -29,18 +30,10 @@ static void hotplug(void)
     }
 }
 
-int main(int argc, char **argv)
+static void register_virtio_rng_test(void)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/virtio/rng/pci/nop", pci_nop);
-    qtest_add_func("/virtio/rng/pci/hotplug", hotplug);
-
-    qtest_start("-device virtio-rng-pci");
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    qos_add_test("rng-nop", "virtio-rng", nop, NULL);
+    qos_add_test("rng-hotplug", "virtio-rng-pci", rng_hotplug, NULL);
 }
+
+libqos_init(register_virtio_rng_test);
