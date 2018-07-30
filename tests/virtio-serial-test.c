@@ -9,33 +9,24 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
-#include "libqos/virtio.h"
+#include "libqos/virtio-serial.h"
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void virtio_serial_nop(void)
+static void virtio_serial_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
+    /* no operation */
 }
 
-static void hotplug(void)
+static void serial_hotplug(void *obj, void *data, QGuestAllocator *alloc)
 {
     qtest_qmp_device_add("virtserialport", "hp-port", NULL);
-
     qtest_qmp_device_del("hp-port");
 }
 
-int main(int argc, char **argv)
+static void virtio_serial_test(void)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/virtio/serial/nop", virtio_serial_nop);
-    qtest_add_func("/virtio/serial/hotplug", hotplug);
-
-    global_qtest = qtest_startf("-device virtio-serial-%s",
-                                qvirtio_get_dev_type());
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    qos_add_test("serial-nop", "virtio-serial", virtio_serial_nop, NULL);
+    qos_add_test("serial-hotplug", "virtio-serial", serial_hotplug, NULL);
 }
+
+libqos_init(virtio_serial_test);
