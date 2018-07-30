@@ -205,7 +205,6 @@ check-qtest-virtio-y += tests/virtio-9p-test$(EXESUF)
 gcov-files-virtio-y += hw/9pfs/virtio-9p.c
 gcov-files-virtio-y += i386-softmmu/hw/9pfs/virtio-9p-device.c
 endif
-check-qtest-virtio-y += tests/virtio-serial-test$(EXESUF)
 gcov-files-virtio-y += i386-softmmu/hw/char/virtio-serial-bus.c
 check-qtest-virtio-y += $(check-qtest-virtioserial-y)
 gcov-files-virtio-y += $(gcov-files-virtioserial-y)
@@ -398,7 +397,6 @@ check-qtest-s390x-$(CONFIG_POSIX) += tests/test-filter-redirector$(EXESUF)
 check-qtest-s390x-y += tests/drive_del-test$(EXESUF)
 check-qtest-s390x-y += tests/virtio-ccw-test$(EXESUF)
 check-qtest-s390x-y += tests/virtio-balloon-test$(EXESUF)
-check-qtest-s390x-y += tests/virtio-serial-test$(EXESUF)
 check-qtest-s390x-y += tests/cpu-plug-test$(EXESUF)
 
 check-qtest-generic-y += tests/machine-none-test$(EXESUF)
@@ -782,6 +780,7 @@ libqgraph-pci-obj-y += tests/libqos/e1000e.o
 libqgraph-tests-obj-y = $(libqgraph-pci-obj-y)
 libqgraph-tests-obj-y += tests/sdhci-test.o
 libqgraph-tests-obj-y += tests/e1000e-test.o
+libqgraph-tests-obj-y += tests/virtio-serial-test.o
 libqgraph-tests-obj-y += tests/virtio-console-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
@@ -832,7 +831,6 @@ tests/virtio-net-test$(EXESUF): tests/virtio-net-test.o $(libqos-pc-obj-y) $(lib
 tests/virtio-rng-test$(EXESUF): tests/virtio-rng-test.o $(libqos-pc-obj-y)
 tests/virtio-scsi-test$(EXESUF): tests/virtio-scsi-test.o $(libqos-virtio-obj-y)
 tests/virtio-9p-test$(EXESUF): tests/virtio-9p-test.o $(libqos-virtio-obj-y)
-tests/virtio-serial-test$(EXESUF): tests/virtio-serial-test.o $(libqos-virtio-obj-y)
 tests/tpci200-test$(EXESUF): tests/tpci200-test.o
 tests/display-vga-test$(EXESUF): tests/display-vga-test.o
 tests/ipoctal232-test$(EXESUF): tests/ipoctal232-test.o
