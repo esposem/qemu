@@ -24,6 +24,10 @@
 #include "libqos/qgraph.h"
 #include "libqos/qgraph_extra.h"
 
+static char *specific_test, *specific_node;
+static bool add_all_test = FALSE;
+static char *old_path;
+
 /**
  * create_machine_name(): appends the architecture to @name if
  * @is_machine is valid.
@@ -244,10 +248,15 @@ static void walk_path(QOSGraphNode *orig_path, int len)
     char *machine = NULL, *arch = NULL, *tmp_cmd = NULL, *str_path;
     char *tmp = orig_path->name, *gfreed;
     GString *cmd_line = g_string_new("");
+    bool add_test = FALSE;
 
     do {
         path = qos_graph_get_node(tmp);
         tmp = qos_graph_get_edge_dest(path->path_edge);
+
+        if (specific_node && !g_strcmp0(specific_node, node_name)) {
+            add_test = TRUE;
+        }
 
         /* append node command line + previous edge command line */
         if (path->command_line && tmp_cmd) {
@@ -280,7 +289,15 @@ static void walk_path(QOSGraphNode *orig_path, int len)
     ro_path[0] = g_strdup(gfreed);
     ro_path[1] = arch;
 
-    qtest_add_data_func(str_path, ro_path, allocate_objects);
+    if (specific_test && !g_strcmp0(specific_test, path->name)) {
+        add_test = TRUE;
+    }
+
+    if (add_test || add_all_test) {
+        qtest_add_data_func(str_path, ro_path, allocate_objects);
+        add_test = FALSE;
+    }
+
     g_free(str_path);
 }
 
@@ -298,6 +315,71 @@ static void walk_path(QOSGraphNode *orig_path, int len)
  */
 int main(int argc, char **argv)
 {
+    int opt = 0, idx = 0;
+
+    static struct option options[] = {
+        { "all", no_argument, 0, 'a' },
+        { "node", required_argument, 0, 'n' },
+        { "test", required_argument, 0, 't' },
+        { "help", no_argument, 0, 'h' },
+        { 0, 0, 0, 0 }
+    };
+
+    if (argc > 1) {
+        opt = getopt_long(argc, argv, "a:n:t:h", options, &idx);
+
+        switch (opt) {
+        case 'a':
+            printf("Running all tests for binary %s...\n",
+                   qtest_get_arch());
+            add_all_test = TRUE;
+            argc--;
+            argv = &argv[1];
+            break;
+        case 'n':
+            printf("Running all tests that use node %s...\n", optarg);
+            specific_node = optarg;
+            argc--;
+            argv = &argv[1];
+            break;
+        case 't':
+            printf("Running test %s...\n", optarg);
+            specific_test = optarg;
+            argc--;
+            argv = &argv[1];
+            break;
+        case 'h':
+            printf("Usage:\nChoose *at most one* of these options (remaining"
+                   " will be fed to g_test_init)\n\n");
+            printf("--all \t\t--a\nExecute all tests (default option).\n"
+                   "Can be omitted in case there are no g_test_init args\n"
+                   "Example (assuming to be in the build folder):\n"
+                   "\tQTEST_QEMU_BINARY=arm-softmmu/qemu-system-arm"
+                   " tests/qos-test --all\n\n");
+            printf("--node NODE\t--n NODE\nExecute all tests that use "
+                   "node NODE\n"
+                   "Example (assuming to be in the build folder):\n"
+                   "\tQTEST_QEMU_BINARY=arm-softmmu/qemu-system-arm"
+                   " tests/qos-test --node sdhci\n\n");
+            printf("--test #\t--t TEST\nExecute tests function TEST.\n"
+                   "TEST do not necessarily match test filename, but the"
+                   "test name the function is registered\n\n"
+                   "Example (assuming to be in the build folder):\n"
+                   "\tQTEST_QEMU_BINARY=arm-softmmu/qemu-system-arm"
+                   " tests/qos-test --test sdhci-test\n\n");
+            printf("--help \t\t--h \nPrint this message and exit\n");
+            exit(0);
+            break;
+        default:
+            add_all_test = TRUE;
+            break;
+        }
+    } else {
+        printf("Running all tests for binary %s...\n",
+               qtest_get_arch());
+        add_all_test = TRUE;
+    }
+
     g_test_init(&argc, &argv, NULL);
     qos_graph_init();
     module_call_init(MODULE_INIT_LIBQOS);
