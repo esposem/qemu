@@ -51,6 +51,11 @@ void qpci_device_foreach(QPCIBus *bus, int vendor_id, int device_id,
     }
 }
 
+bool qpci_has_buggy_msi(QPCIDevice *dev)
+{
+    return dev->bus->has_buggy_msi;
+}
+
 static void qpci_device_set(QPCIDevice *dev, QPCIBus *bus, int devfn)
 {
     g_assert(dev);
