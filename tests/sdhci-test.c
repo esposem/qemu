@@ -55,13 +55,14 @@ FIELD(SDHC_CAPAB, DRIVER,                   36, 3); /* since v3 */
     Exynos4210
         { "arm",    "smdkc210",
             {0x12510000, 2, 0,  {1, 0x5e80080} } },
- *
- * FIXME: the following drivers are missing:
- *
 
     i.MX 6
         { "arm",    "sabrelite",
             {0x02190000, 3, 0,  {1, 0x057834b4} } },
+
+ *
+ * FIXME: the following drivers are missing:
+ *
 
     Zynq-7000
         { "arm",    "xilinx-zynq-a9",   Datasheet: UG585 (v1.12.1)

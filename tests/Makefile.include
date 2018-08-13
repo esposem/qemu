@@ -759,6 +759,7 @@ libqos-virtio-obj-y = $(libqos-spapr-obj-y) $(libqos-pc-obj-y) tests/libqos/virt
 libqgraph-arm-machines-obj-y = tests/libqos/raspi2-machine.o
 libqgraph-arm-machines-obj-y += tests/libqos/virt-machine.o
 libqgraph-arm-machines-obj-y += tests/libqos/smdkc210-machine.o
+libqgraph-arm-machines-obj-y += tests/libqos/sabrelite-machine.o
 
 libqgraph-machines-obj-y = $(libqgraph-arm-machines-obj-y)
 libqgraph-machines-obj-y += tests/libqos/x86_64_pc-machine.o
