@@ -60,13 +60,13 @@ FIELD(SDHC_CAPAB, DRIVER,                   36, 3); /* since v3 */
         { "arm",    "sabrelite",
             {0x02190000, 3, 0,  {1, 0x057834b4} } },
 
- *
- * FIXME: the following drivers are missing:
- *
-
     Zynq-7000
         { "arm",    "xilinx-zynq-a9",   Datasheet: UG585 (v1.12.1)
             {0xe0100000, 2, 0,  {1, 0x69ec0080} } },
+
+ *
+ * FIXME: the following drivers are missing:
+ *
 
     ZynqMP
         { "aarch64", "xlnx-zcu102",     Datasheet: UG1085 (v1.7)
