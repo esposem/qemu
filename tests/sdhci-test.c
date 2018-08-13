@@ -51,12 +51,13 @@ FIELD(SDHC_CAPAB, DRIVER,                   36, 3); /* since v3 */
     BCM2835
         { "arm",    "raspi2",
             {0x3f300000, 3, 52, {0, 0x052134b4} } },
- *
- * FIXME: the following drivers are missing:
- *
+
     Exynos4210
         { "arm",    "smdkc210",
             {0x12510000, 2, 0,  {1, 0x5e80080} } },
+ *
+ * FIXME: the following drivers are missing:
+ *
 
     i.MX 6
         { "arm",    "sabrelite",

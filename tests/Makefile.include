@@ -756,10 +756,13 @@ libqos-imx-obj-y = $(libqos-obj-y) tests/libqos/i2c-imx.o
 libqos-usb-obj-y = $(libqos-spapr-obj-y) $(libqos-pc-obj-y) tests/libqos/usb.o
 libqos-virtio-obj-y = $(libqos-spapr-obj-y) $(libqos-pc-obj-y) tests/libqos/virtio.o tests/libqos/virtio-pci.o tests/libqos/virtio-mmio.o tests/libqos/malloc-generic.o
 
-libqgraph-machines-obj-y = tests/libqos/x86_64_pc-machine.o
-libqgraph-machines-obj-y += tests/libqos/raspi2-machine.o
+libqgraph-arm-machines-obj-y = tests/libqos/raspi2-machine.o
+libqgraph-arm-machines-obj-y += tests/libqos/virt-machine.o
+libqgraph-arm-machines-obj-y += tests/libqos/smdkc210-machine.o
+
+libqgraph-machines-obj-y = $(libqgraph-arm-machines-obj-y)
+libqgraph-machines-obj-y += tests/libqos/x86_64_pc-machine.o
 libqgraph-machines-obj-y += tests/libqos/ppc64_pseries-machine.o
-libqgraph-machines-obj-y += tests/libqos/virt-machine.o
 
 libqgraph-virtio-obj-y = tests/libqos/virtio-serial.o
 libqgraph-virtio-obj-y += tests/libqos/virtio-9p.o
