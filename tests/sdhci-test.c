@@ -22,57 +22,6 @@ FIELD(SDHC_CAPAB, SDR,                      32, 3); /* since v3 */
 FIELD(SDHC_CAPAB, DRIVER,                   36, 3); /* since v3 */
 #define SDHC_HCVER                      0xFE
 
-/**
- * Old sdhci_t structure:
- *
-    struct sdhci_t {
-        const char *arch, *machine;
-        struct {
-            uintptr_t addr;
-            uint8_t version;
-            uint8_t baseclock;
-            struct {
-                bool sdma;
-                uint64_t reg;
-            } capab;
-        } sdhci;
-        struct {
-            uint16_t vendor_id, device_id;
-        } pci;
-    }
- *
- * implemented drivers:
- *
-    PC via PCI
-        { "x86_64", "pc",
-            {-1,         2, 0,  {1, 0x057834b4} },
-            .pci = { PCI_VENDOR_ID_REDHAT, PCI_DEVICE_ID_REDHAT_SDHCI } },
-
-    BCM2835
-        { "arm",    "raspi2",
-            {0x3f300000, 3, 52, {0, 0x052134b4} } },
-
-    Exynos4210
-        { "arm",    "smdkc210",
-            {0x12510000, 2, 0,  {1, 0x5e80080} } },
-
-    i.MX 6
-        { "arm",    "sabrelite",
-            {0x02190000, 3, 0,  {1, 0x057834b4} } },
-
-    Zynq-7000
-        { "arm",    "xilinx-zynq-a9",   Datasheet: UG585 (v1.12.1)
-            {0xe0100000, 2, 0,  {1, 0x69ec0080} } },
-
- *
- * FIXME: the following drivers are missing:
- *
-
-    ZynqMP
-        { "aarch64", "xlnx-zcu102",     Datasheet: UG1085 (v1.7)
-            {0xff160000, 3, 0,  {1, 0x280737ec6481} } },
- */
-
 static void check_specs_version(QSDHCI *s, uint8_t version)
 {
     uint32_t v;
