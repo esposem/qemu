@@ -326,7 +326,6 @@ gcov-files-ppc-y += hw/timer/m48t59.c
 
 check-qtest-ppc64-y = $(check-qtest-ppc-y)
 gcov-files-ppc64-y = $(subst ppc-softmmu/,ppc64-softmmu/,$(gcov-files-ppc-y))
-check-qtest-ppc64-y += tests/spapr-phb-test$(EXESUF)
 gcov-files-ppc64-y += ppc64-softmmu/hw/ppc/spapr_pci.c
 check-qtest-ppc64-y += tests/pnv-xscom-test$(EXESUF)
 check-qtest-ppc64-y += tests/migration-test$(EXESUF)
@@ -793,6 +792,7 @@ libqgraph-tests-obj-y += tests/ipoctal232-test.o
 libqgraph-tests-obj-y += tests/ne2000-test.o
 libqgraph-tests-obj-y += tests/nvme-test.o
 libqgraph-tests-obj-y += tests/pcnet-test.o
+libqgraph-tests-obj-y += tests/spapr-phb-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -805,7 +805,6 @@ tests/device-introspect-test$(EXESUF): tests/device-introspect-test.o
 tests/rtc-test$(EXESUF): tests/rtc-test.o
 tests/m48t59-test$(EXESUF): tests/m48t59-test.o
 tests/endianness-test$(EXESUF): tests/endianness-test.o
-tests/spapr-phb-test$(EXESUF): tests/spapr-phb-test.o $(libqos-obj-y)
 tests/prom-env-test$(EXESUF): tests/prom-env-test.o $(libqos-obj-y)
 tests/rtas-test$(EXESUF): tests/rtas-test.o $(libqos-spapr-obj-y)
 tests/fdc-test$(EXESUF): tests/fdc-test.o
