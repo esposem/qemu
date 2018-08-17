@@ -213,7 +213,6 @@ gcov-files-pci-y += hw/net/pcnet-pci.c
 check-qtest-pci-y += tests/eepro100-test$(EXESUF)
 gcov-files-pci-y += hw/net/eepro100.c
 gcov-files-pci-y += hw/net/ne2000.c
-check-qtest-pci-y += tests/nvme-test$(EXESUF)
 gcov-files-pci-y += hw/block/nvme.c
 gcov-files-pci-y += hw/audio/ac97.c
 check-qtest-pci-y += tests/es1370-test$(EXESUF)
@@ -793,6 +792,7 @@ libqgraph-tests-obj-y += tests/ac97-test.o
 libqgraph-tests-obj-y += tests/tpci200-test.o
 libqgraph-tests-obj-y += tests/ipoctal232-test.o
 libqgraph-tests-obj-y += tests/ne2000-test.o
+libqgraph-tests-obj-y += tests/nvme-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -841,7 +841,6 @@ tests/test-hmp$(EXESUF): tests/test-hmp.o
 tests/machine-none-test$(EXESUF): tests/machine-none-test.o
 tests/drive_del-test$(EXESUF): tests/drive_del-test.o $(libqos-virtio-obj-y)
 tests/qdev-monitor-test$(EXESUF): tests/qdev-monitor-test.o $(libqos-pc-obj-y)
-tests/nvme-test$(EXESUF): tests/nvme-test.o
 tests/pvpanic-test$(EXESUF): tests/pvpanic-test.o
 tests/i82801b11-test$(EXESUF): tests/i82801b11-test.o
 tests/es1370-test$(EXESUF): tests/es1370-test.o

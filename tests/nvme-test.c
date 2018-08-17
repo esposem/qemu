@@ -9,24 +9,47 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "libqos/qgraph.h"
+
+typedef struct QNvme QNvme;
+
+struct QNvme {
+    QOSGraphObject obj;
+};
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void nop(void)
+static void nop(void *obj, void *data, QGuestAllocator *alloc)
 {
 }
 
-int main(int argc, char **argv)
+static void nvme_destructor(QOSGraphObject *obj)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/nvme/nop", nop);
-
-    qtest_start("-drive id=drv0,if=none,file=null-co://,format=raw "
-                "-device nvme,drive=drv0,serial=foo");
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    QNvme *nvme = (QNvme *)obj;
+    g_free(nvme);
 }
+
+static void *nvme_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
+{
+    QNvme *nvme = g_new0(QNvme, 1);
+    nvme->obj.destructor = nvme_destructor;
+
+    return &nvme->obj;
+}
+
+static void nvme_register_nodes(void)
+{
+    qos_node_create_driver("nvme", nvme_create);
+    qos_node_consumes("nvme", "pci-bus", &(QOSGraphEdgeOptions) {
+        .extra_device_opts = "drive=drv0,serial=foo",
+        .before_cmd_line = "-drive id=drv0,if=none,file=null-co://,format=raw",
+    });
+}
+
+libqos_init(nvme_register_nodes);
+
+static void register_nvme_test(void)
+{
+    qos_add_test("nvme-test", "nvme", nop, NULL);
+}
+
+libqos_init(register_nvme_test);
