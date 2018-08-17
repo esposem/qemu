@@ -9,23 +9,44 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "libqos/qgraph.h"
+
+typedef struct QNe2k_pci QNe2k_pci;
+
+struct QNe2k_pci {
+    QOSGraphObject obj;
+};
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void pci_nop(void)
+static void pci_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
 }
 
-int main(int argc, char **argv)
+static void ne2k_pci_destructor(QOSGraphObject *obj)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/ne2000/pci/nop", pci_nop);
-
-    qtest_start("-device ne2k_pci");
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    QNe2k_pci *ne2k_pci = (QNe2k_pci *)obj;
+    g_free(ne2k_pci);
 }
+
+static void *ne2k_pci_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
+{
+    QNe2k_pci *ne2k_pci = g_new0(QNe2k_pci, 1);
+    ne2k_pci->obj.destructor = ne2k_pci_destructor;
+
+    return &ne2k_pci->obj;
+}
+
+static void ne2000_register_nodes(void)
+{
+    qos_node_create_driver("ne2k_pci", ne2k_pci_create);
+    qos_node_consumes("ne2k_pci", "pci-bus", NULL);
+}
+
+libqos_init(ne2000_register_nodes);
+
+static void register_ne2000_test(void)
+{
+    qos_add_test("ne2000-test", "ne2k_pci", pci_nop, NULL);
+}
+
+libqos_init(register_ne2000_test);
