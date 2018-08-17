@@ -209,7 +209,6 @@ check-qtest-pci-y += tests/rtl8139-test$(EXESUF)
 gcov-files-pci-y += hw/net/rtl8139.c
 gcov-files-pci-y += hw/net/pcnet.c
 gcov-files-pci-y += hw/net/pcnet-pci.c
-check-qtest-pci-y += tests/eepro100-test$(EXESUF)
 gcov-files-pci-y += hw/net/eepro100.c
 gcov-files-pci-y += hw/net/ne2000.c
 gcov-files-pci-y += hw/block/nvme.c
@@ -792,6 +791,7 @@ libqgraph-tests-obj-y += tests/spapr-phb-test.o
 libqgraph-tests-obj-y += tests/usb-hcd-ohci-test.o $(libqos-usb-obj-y)
 libqgraph-tests-obj-y += tests/vmxnet3-test.o
 libqgraph-tests-obj-y += tests/es1370-test.o
+libqgraph-tests-obj-y += tests/eepro100-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -827,7 +827,6 @@ tests/fw_cfg-test$(EXESUF): tests/fw_cfg-test.o $(libqos-pc-obj-y)
 tests/e1000-test$(EXESUF): tests/e1000-test.o
 tests/rtl8139-test$(EXESUF): tests/rtl8139-test.o $(libqos-pc-obj-y)
 tests/pnv-xscom-test$(EXESUF): tests/pnv-xscom-test.o
-tests/eepro100-test$(EXESUF): tests/eepro100-test.o
 tests/wdt_ib700-test$(EXESUF): tests/wdt_ib700-test.o
 tests/tco-test$(EXESUF): tests/tco-test.o $(libqos-pc-obj-y)
 tests/virtio-ccw-test$(EXESUF): tests/virtio-ccw-test.o
