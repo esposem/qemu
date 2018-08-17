@@ -217,7 +217,6 @@ check-qtest-pci-y += tests/ne2000-test$(EXESUF)
 gcov-files-pci-y += hw/net/ne2000.c
 check-qtest-pci-y += tests/nvme-test$(EXESUF)
 gcov-files-pci-y += hw/block/nvme.c
-check-qtest-pci-y += tests/ac97-test$(EXESUF)
 gcov-files-pci-y += hw/audio/ac97.c
 check-qtest-pci-y += tests/es1370-test$(EXESUF)
 gcov-files-pci-y += hw/audio/es1370.c
@@ -792,6 +791,7 @@ libqgraph-tests-obj-y += tests/virtio-rng-test.o
 libqgraph-tests-obj-y += tests/virtio-blk-test.o
 libqgraph-tests-obj-y += tests/virtio-net-test.o
 libqgraph-tests-obj-y += tests/virtio-scsi-test.o
+libqgraph-tests-obj-y += tests/ac97-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -846,7 +846,6 @@ tests/qdev-monitor-test$(EXESUF): tests/qdev-monitor-test.o $(libqos-pc-obj-y)
 tests/nvme-test$(EXESUF): tests/nvme-test.o
 tests/pvpanic-test$(EXESUF): tests/pvpanic-test.o
 tests/i82801b11-test$(EXESUF): tests/i82801b11-test.o
-tests/ac97-test$(EXESUF): tests/ac97-test.o
 tests/es1370-test$(EXESUF): tests/es1370-test.o
 tests/intel-hda-test$(EXESUF): tests/intel-hda-test.o
 tests/ioh3420-test$(EXESUF): tests/ioh3420-test.o
