@@ -9,23 +9,44 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "libqos/qgraph.h"
+
+typedef struct QES1370 QES1370;
+
+struct QES1370 {
+    QOSGraphObject obj;
+};
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void nop(void)
+static void nop(void *obj, void *data, QGuestAllocator *alloc)
 {
 }
 
-int main(int argc, char **argv)
+static void es1370_destructor(QOSGraphObject *obj)
 {
-    int ret;
-
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/es1370/nop", nop);
-
-    qtest_start("-device ES1370");
-    ret = g_test_run();
-
-    qtest_end();
-
-    return ret;
+    QES1370 *es1370 = (QES1370 *)obj;
+    g_free(es1370);
 }
+
+static void *es1370_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
+{
+    QES1370 *es1370 = g_new0(QES1370, 1);
+    es1370->obj.destructor = es1370_destructor;
+
+    return &es1370->obj;
+}
+
+static void es1370_register_nodes(void)
+{
+    qos_node_create_driver("ES1370", es1370_create);
+    qos_node_consumes("ES1370", "pci-bus", NULL);
+}
+
+libqos_init(es1370_register_nodes);
+
+static void register_es1370_test(void)
+{
+    qos_add_test("es1370-test", "ES1370", nop, NULL);
+}
+
+libqos_init(register_es1370_test);
