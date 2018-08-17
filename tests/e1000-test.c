@@ -9,22 +9,13 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "libqos/qgraph.h"
 
-/* Tests only initialization so far. TODO: Replace with functional tests */
-static void test_device(gconstpointer data)
-{
-    const char *model = data;
-    QTestState *s;
-    char *args;
+typedef struct QE1000 QE1000;
 
-    args = g_strdup_printf("-device %s", model);
-    s = qtest_start(args);
-
-    if (s) {
-        qtest_quit(s);
-    }
-    g_free(args);
-}
+struct QE1000 {
+    QOSGraphObject obj;
+};
 
 static const char *models[] = {
     "e1000",
@@ -33,19 +24,48 @@ static const char *models[] = {
     "e1000-82545em",
 };
 
-int main(int argc, char **argv)
+/* Tests only initialization so far. TODO: Replace with functional tests */
+static void nop(void *obj, void *data, QGuestAllocator *alloc)
+{
+}
+
+static void e1000_destructor(QOSGraphObject *obj)
+{
+    QE1000 *e1000 = (QE1000 *)obj;
+    g_free(e1000);
+}
+
+static void *e1000_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
+{
+    QE1000 *e1000 = g_new0(QE1000, 1);
+    e1000->obj.destructor = e1000_destructor;
+
+    return &e1000->obj;
+}
+
+static void e1000_register_nodes(void)
 {
     int i;
 
-    g_test_init(&argc, &argv, NULL);
+    for (i = 0; i < ARRAY_SIZE(models); i++) {
+        qos_node_create_driver(models[i], e1000_create);
+        qos_node_consumes(models[i], "pci-bus", NULL);
+    }
+}
+
+libqos_init(e1000_register_nodes);
+
+static void register_e1000_test(void)
+{
+    int i;
 
     for (i = 0; i < ARRAY_SIZE(models); i++) {
         char *path;
 
-        path = g_strdup_printf("e1000/%s", models[i]);
-        qtest_add_data_func(path, models[i], test_device);
+        path = g_strdup_printf("%s-e1000-test", models[i]);
+        qos_add_test(path, models[i], nop, NULL);
         g_free(path);
     }
-
-    return g_test_run();
 }
+
+libqos_init(register_e1000_test);

@@ -202,7 +202,6 @@ gcov-files-virtio-y += i386-softmmu/hw/char/virtio-serial-bus.c
 check-qtest-virtio-y += $(check-qtest-virtioserial-y)
 gcov-files-virtio-y += $(gcov-files-virtioserial-y)
 
-check-qtest-pci-y += tests/e1000-test$(EXESUF)
 gcov-files-pci-y += hw/net/e1000.c
 gcov-files-pci-y += hw/net/e1000e.c hw/net/e1000e_core.c
 check-qtest-pci-y += tests/rtl8139-test$(EXESUF)
@@ -792,6 +791,7 @@ libqgraph-tests-obj-y += tests/usb-hcd-ohci-test.o $(libqos-usb-obj-y)
 libqgraph-tests-obj-y += tests/vmxnet3-test.o
 libqgraph-tests-obj-y += tests/es1370-test.o
 libqgraph-tests-obj-y += tests/eepro100-test.o
+libqgraph-tests-obj-y += tests/e1000-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -824,7 +824,6 @@ tests/m25p80-test$(EXESUF): tests/m25p80-test.o
 tests/i440fx-test$(EXESUF): tests/i440fx-test.o $(libqos-pc-obj-y)
 tests/q35-test$(EXESUF): tests/q35-test.o $(libqos-pc-obj-y)
 tests/fw_cfg-test$(EXESUF): tests/fw_cfg-test.o $(libqos-pc-obj-y)
-tests/e1000-test$(EXESUF): tests/e1000-test.o
 tests/rtl8139-test$(EXESUF): tests/rtl8139-test.o $(libqos-pc-obj-y)
 tests/pnv-xscom-test$(EXESUF): tests/pnv-xscom-test.o
 tests/wdt_ib700-test$(EXESUF): tests/wdt_ib700-test.o
