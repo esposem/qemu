@@ -184,7 +184,6 @@ gcov-files-generic-y = qdev-monitor.c qmp.c
 check-qtest-generic-y += tests/cdrom-test$(EXESUF)
 
 gcov-files-ipack-y += hw/ipack/ipack.c
-check-qtest-ipack-y += tests/ipoctal232-test$(EXESUF)
 gcov-files-ipack-y += hw/char/ipoctal232.c
 
 gcov-files-virtioserial-y += hw/char/virtio-console.c
@@ -793,6 +792,7 @@ libqgraph-tests-obj-y += tests/virtio-net-test.o
 libqgraph-tests-obj-y += tests/virtio-scsi-test.o
 libqgraph-tests-obj-y += tests/ac97-test.o
 libqgraph-tests-obj-y += tests/tpci200-test.o
+libqgraph-tests-obj-y += tests/ipoctal232-test.o
 
 check-unit-y += tests/test-qgraph$(EXESUF)
 tests/test-qgraph$(EXESUF): tests/test-qgraph.o $(libqgraph-obj-y)
@@ -837,7 +837,6 @@ tests/wdt_ib700-test$(EXESUF): tests/wdt_ib700-test.o
 tests/tco-test$(EXESUF): tests/tco-test.o $(libqos-pc-obj-y)
 tests/virtio-ccw-test$(EXESUF): tests/virtio-ccw-test.o
 tests/display-vga-test$(EXESUF): tests/display-vga-test.o
-tests/ipoctal232-test$(EXESUF): tests/ipoctal232-test.o
 tests/qom-test$(EXESUF): tests/qom-test.o
 tests/test-hmp$(EXESUF): tests/test-hmp.o
 tests/machine-none-test$(EXESUF): tests/machine-none-test.o
