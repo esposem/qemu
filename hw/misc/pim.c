@@ -489,8 +489,6 @@ static void pci_edu_uninit(PCIDevice *pdev)
 
     timer_del(&edu->dma_timer);
     msi_uninit(pdev);
-
-    free(edu->dma_buf);
 }
 
 static void edu_instance_init(Object *obj)
@@ -520,6 +518,13 @@ static void edu_class_init(ObjectClass *class, void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
+static void edu_instance_uninit(Object *obj)
+{
+    PIMState *edu = PIM(obj);
+    printf("Uninit PIM\n");
+    free(edu->dma_buf);
+}
+
 static void pci_edu_register_types(void)
 {
     static InterfaceInfo interfaces[] = {
@@ -531,6 +536,7 @@ static void pci_edu_register_types(void)
         .parent        = TYPE_PCI_DEVICE,
         .instance_size = sizeof(PIMState),
         .instance_init = edu_instance_init,
+        .instance_finalize = edu_instance_uninit,
         .class_init    = edu_class_init,
         .interfaces = interfaces,
     };
