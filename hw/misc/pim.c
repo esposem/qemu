@@ -25,7 +25,6 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/pci/pci.h"
-#include "hw/pci/pci_bridge.h"
 #include "hw/hw.h"
 #include "hw/pci/msi.h"
 #include "qemu/timer.h"
@@ -42,8 +41,8 @@
 #define DMA_IRQ         0x00000100
 
 #define DMA_START       0x40000
-// #define DMA_SIZE        4096
-#define DMA_SIZE        (1 << 30)
+#define DMA_SIZE        4096
+// #define DMA_SIZE        (1 << 30)
 
 typedef struct {
     PCIDevice pdev;
@@ -276,7 +275,7 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
             printf("Read 0x90, (size DMA) return %lx\n", val);
             break;
         case 0x98:
-            dma_rw(edu, false, &val, &edu->dma.cmd, false);
+            dma_rw(edu, false, &val, &edu->dma.cmd, true);
             printf("Read 0x98, (cmd DMA) return %lx. pos 1, start, pos 2 dir, pos 4 IR enable\n", val);
             break;
     }
@@ -374,6 +373,13 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         }
 
         dma_rw(edu, true, &val, &edu->dma.cmd, true);
+
+        // val = 0x1;
+        // edu->dma.dst = edu->dma.src;
+        // edu->dma.src = 0x1c0000000;
+        // edu->dma.cnt = sizeof(uint32_t);
+        // dma_rw(edu, false, &edu->dma.cmd, &val, true);
+        // printf("Buffer %x\n", ((uint32_t *) edu->dma_buf)[0]);
         break;
     }
 
@@ -477,7 +483,7 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
     qemu_thread_create(&edu->thread, "edu", edu_fact_thread,
                        edu, QEMU_THREAD_JOINABLE);
 
-    memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", UINT32_MAX);
+    memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", 1 * GiB);
     memory_region_set_enabled(&dev_memory, true);
     address_space_init(&dev_addr_space, &dev_memory, "p_memory");
 
@@ -485,7 +491,7 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
                     "edu-mmio", 1 * MiB);
 
     Error *err = NULL;
-    memory_region_init_ram(&edu->ram, OBJECT(edu), "edu-ram", 1 * MiB, &err);
+    memory_region_init_ram(&edu->ram, OBJECT(edu), "edu-ram", 1 * GiB, &err);
 
     if(err) {
         error_report("%s", error_get_pretty(err));
@@ -495,25 +501,23 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
     memory_region_add_subregion(&dev_memory, 0, &edu->ram);
 
 
-    // This seems to work
+    pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64, &edu->mmio);
+
+    pci_register_bar(pdev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64, &dev_memory);
+
+        // This seems to work/
     char buff[5];
 
-    memset(buff, 'a', 5);
+    memset(buff, 'b', 5);
     address_space_write(&dev_addr_space, 0x0, MEMTXATTRS_UNSPECIFIED, buff, 5);
     memset(buff, 0, 5);
     address_space_read(&dev_addr_space, 0x0, MEMTXATTRS_UNSPECIFIED, buff, 5);
     printf("Buffer %.5s\n", buff); // reads PIM memory?
     memset(buff, 0, 5);
+    pci_dma_read(pdev, 0x1c0000000, buff, 5);
+    printf("Buffer %.5s\n", buff); // reads system ram
     pci_dma_read(pdev, 0x0, buff, 5);
     printf("Buffer %.5s\n", buff); // reads system ram
-
-
-
-    pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &edu->mmio);
-
-    // printf("Base %lx\n", pci_bridge_get_base(pdev, PCI_BASE_ADDRESS_SPACE_MEMORY));
-    // printf("Limit %lx\n", pci_bridge_get_limit(pdev, PCI_BASE_ADDRESS_SPACE_MEMORY));
-    pci_register_bar(pdev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &edu->ram);
 }
 
 static void pci_edu_uninit(PCIDevice *pdev)
