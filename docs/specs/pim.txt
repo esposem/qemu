@@ -82,10 +82,12 @@ size == 8 for the rest.
 
 0x110 (RO):  Read buffer at 0x40000
 
-0x110 (WO): performs memset 0 of size set in 0x90. Requires all registers
+0x110 (WO): performs memset of size set in 0x90. Requires all registers
 	     of DMA set beforehand, except 0x98
 
+0x118 (WO): memsets the device buffer to the given value
 
+0x120 (WO): [temporary test to check mmap] writes the given address in the PIM local memory
 IRQ controller
 --------------
 An IRQ is generated when written to the interrupt raise register. The value
