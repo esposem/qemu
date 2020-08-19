@@ -36,13 +36,30 @@
 
 #define TYPE_PCI_PIM_DEVICE "pim"
 #define PIM(obj)        OBJECT_CHECK(PIMState, obj, TYPE_PCI_PIM_DEVICE)
+#define EDU_DEVICE_ID 0x11e8
 
 #define FACT_IRQ        0x00000001
 #define DMA_IRQ         0x00000100
+#define LOCAL_DMA_IRQ   0x00000101
 
 #define DMA_START       0x40000
 #define DMA_SIZE        4096
 // #define DMA_SIZE        (1 << 30)
+
+#define LOCAL_MEM_SIZE        (1*GiB)
+#define LOCAL_DMA_START       0x50000
+#define LOCAL_DMA_SIZE        4096
+// #define LOCAL_DMA_SIZE        (1 << 30)
+
+#define COPY_CMD 0x1
+
+
+struct dma_state {
+    dma_addr_t src;
+    dma_addr_t dst;
+    dma_addr_t cnt;
+    dma_addr_t cmd;
+} dma;
 
 typedef struct {
     PCIDevice pdev;
@@ -59,27 +76,27 @@ typedef struct {
 #define EDU_STATUS_COMPUTING    0x01
 #define EDU_STATUS_IRQFACT      0x80
     uint32_t status;
-
+    struct dma_state dma;
+    struct dma_state local_dma;
     uint32_t irq_status;
 
 #define EDU_DMA_RUN             0x1
-#define EDU_DMA_DIR(cmd)        (((cmd) & 0x2) >> 1)
-# define EDU_DMA_FROM_PCI       0
-# define EDU_DMA_TO_PCI         1
-#define EDU_DMA_IRQ             0x4
-    struct dma_state {
-        dma_addr_t src;
-        dma_addr_t dst;
-        dma_addr_t cnt;
-        dma_addr_t cmd;
-    } dma;
+#define EDU_DMA_DIR(cmd)        (cmd & 0x1)
+#define EDU_DMA_FROM_PCI        0
+#define EDU_DMA_TO_PCI          1
+
     QEMUTimer dma_timer;
     char *dma_buf;
+
+    QEMUTimer local_timer;
+    char *local_dma_buf;
+
     uint64_t dma_mask;
 } PIMState;
 
-MemoryRegion dev_memory;
-// AddressSpace dev_addr_space;
+static MemoryRegion dev_memory;
+static AddressSpace dev_addr_space;
+static bool dma_running, local_dma_running;
 
 static bool edu_msi_enabled(PIMState *edu)
 {
@@ -109,7 +126,7 @@ static void edu_lower_irq(PIMState *edu, uint32_t val)
 
 static bool within(uint64_t addr, uint64_t start, uint64_t end)
 {
-    return start <= addr && addr <= end; // TODO: the <= end instead of < correct?
+    return start <= addr && addr <= end;
 }
 
 static void edu_check_range(uint64_t addr, uint64_t size1, uint64_t start,
@@ -128,80 +145,178 @@ static void edu_check_range(uint64_t addr, uint64_t size1, uint64_t start,
             addr, end1 - 1, start, end2 - 1);
 }
 
-static dma_addr_t edu_clamp_addr(const PIMState *edu, dma_addr_t addr)
-{
+// static dma_addr_t edu_clamp_addr(const PIMState *edu, dma_addr_t addr)
+// {
     // dma_addr_t res = addr & edu->dma_mask;
-    dma_addr_t res = addr;
+    // dma_addr_t res = addr;
 
-    if (addr != res) {
-        printf("EDU: clamping DMA %#.16"PRIx64" to %#.16"PRIx64"!\n", addr, res);
+    // if (addr != res) {
+    //     printf("EDU: clamping DMA %#.16"PRIx64" to %#.16"PRIx64"!\n", addr, res);
+    // }
+
+    // return res;
+// }
+
+static void host_memory_copy(bool is_dma, struct dma_state *state, PIMState *edu)
+{
+    char *host_src, *host_dest;
+    MemoryRegionSection section_src, section_dest;
+    MemoryRegion *mr = &edu->ram;
+
+    if (is_dma){
+        // printf("Is a dma host-host\n");
+        mr = get_system_memory();
     }
 
-    return res;
+    section_src = memory_region_find(mr, state->src, state->cnt);
+    section_dest = memory_region_find(mr, state->dst, state->cnt);
+
+    if (section_src.size == 0 || section_dest.size == 0) {
+        printf("host-host copy: no section found in src or dest\n");
+    }
+
+
+    host_src = (char *) memory_region_get_ram_ptr(section_src.mr);
+    // printf("Host src is %.5s\n", host_src);
+    host_src += section_src.offset_within_region;
+    // printf("Host src off is %.5s\n", host_src);
+
+    host_dest = (char *) memory_region_get_ram_ptr(section_dest.mr);
+    // printf("Host dest is %.5s\n", host_dest);
+    host_dest += section_dest.offset_within_region;
+    // printf("Host dest off is %.5s\n", host_dest);
+
+    // printf("Src hw addr is %lx\n", state->src);
+    // printf("Dest hw addr is %lx\n", state->dst);
+
+    // printf("Size of transfer %ld\n", state->cnt);
+    // qemu_mutex_lock_iothread();
+    memmove(host_dest, host_src, state->cnt);
+    // printf("NOW Host dest off is %.5s\n", host_dest);
+
+    // qemu_mutex_unlock_iothread();
 }
 
-static void edu_dma_timer(void *opaque)
+static void pim_timer(void *opaque, uint64_t buff_start, uint64_t buff_size)
 {
     PIMState *edu = opaque;
+    bool use_dma = buff_start == DMA_START;
     int err;
+    struct dma_state *state = &edu->dma;
+    char *buff_used = edu->dma_buf;
 
-    if (!(edu->dma.cmd & EDU_DMA_RUN)) {
-        return;
+    if(!use_dma) {
+        state = &edu->local_dma;
+        buff_used = edu->local_dma_buf;
     }
 
-    if (EDU_DMA_DIR(edu->dma.cmd) == EDU_DMA_FROM_PCI) {
+    if (EDU_DMA_DIR(state->cmd) == EDU_DMA_FROM_PCI) {
         // printf("MEM -> DEV\n");
 
-        uint64_t dst = edu->dma.dst;
-        edu_check_range(dst, edu->dma.cnt, DMA_START, DMA_SIZE);
-        dst -= DMA_START;
+        uint64_t dst = state->dst;
+        // printf("Destionation is %lx [%lx, %lx]\n", dst, buff_start, buff_size);
+        if(within(dst, buff_start, buff_start+buff_size)) { // dest is buffer-included
+            // printf("Dest is buffer-included\n");
+            edu_check_range(dst, state->cnt, buff_start, buff_size);
+            dst -= buff_start;
 
-        err = pci_dma_read(&edu->pdev, edu_clamp_addr(edu, edu->dma.src),
-                edu->dma_buf + dst, edu->dma.cnt);
+            if (use_dma) {
+                // printf("Use DMA\n");
+                err = pci_dma_read(&edu->pdev, state->src,
+                buff_used + dst, state->cnt);
 
-        if(err != 0){
-            perror("pci_dma_read");
-            printf("ERROR %d\n", err);
+                if(err != 0){
+                    perror("pci_dma_read");
+                    printf("ERROR %d\n", err);
+                }
+            } else {
+                MemTxResult res;
+                // printf("Use Local %lx\n", dst);
+                res = address_space_read(&dev_addr_space, dst, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf, state->cnt);
+
+                if(res != MEMTX_OK){
+                    printf("PIM Local memory read error!\n");
+                }
+            }
+
+        } else {
+            // printf("Use host\n");
+            host_memory_copy(use_dma, state, edu);
         }
 
-        // printf("Read src:%lx dest:%lx %lx, size:%lx\n", edu_clamp_addr(edu, edu->dma.src),(dma_addr_t) edu->dma_buf + dst, (dma_addr_t)edu->dma_buf, edu->dma.cnt);
+        // printf("Read src:%lx dest:%lx (base %lx), size:%lu\n", state->src,(dma_addr_t) buff_used + dst, (dma_addr_t)buff_used, state->cnt);
 
     } else {
         // printf("DEV -> MEM\n");
 
-        uint64_t src = edu->dma.src;
-        src -= DMA_START;
+        uint64_t src = state->src;
+        bool buffer_included = within(src, buff_start, buff_start+buff_size);
 
-        uint64_t tot_size = edu->dma.cnt;
+        // printf("Src is %lx [%lx, %lx]\n", src, buff_start, buff_size);
+
+        if(buffer_included) { // src is buffer_included
+            src -= buff_start;
+        }
+
+        uint64_t tot_size = state->cnt;
 
         while(tot_size > 0) {
 
-            edu->dma.cnt = MIN(DMA_SIZE, tot_size);
+            state->cnt = MIN(buff_size, tot_size);
 
-            err = pci_dma_write(&edu->pdev, edu_clamp_addr(edu, edu->dma.dst),
-                edu->dma_buf + src, edu->dma.cnt);
+            if(buffer_included) {
+                if(use_dma){
+                // printf("Use DMA\n");
+                    err = pci_dma_write(&edu->pdev, state->dst,
+                        buff_used + src, state->cnt);
 
-            if(err != 0){
-                perror("pci_dma_write");
-                printf("ERROR %d\n", err);
+                    if(err != 0){
+                        perror("pci_dma_write");
+                        printf("ERROR %d\n", err);
+                    }
+                } else {
+                    MemTxResult res;
+                    // printf("Use Local\n");
+                    res = address_space_write(&dev_addr_space, state->dst, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf + src, state->cnt);
+
+                    if(res != MEMTX_OK){
+                        printf("PIM Local memory read error!\n");
+                    }
+                }
+            } else {
+                // printf("Use host\n");
+                host_memory_copy(use_dma, state, edu);
             }
 
-            edu->dma.dst += DMA_SIZE;
-            tot_size -= edu->dma.cnt;
+            state->dst += buff_size;
+            tot_size -= state->cnt;
         }
 
     }
 
-    edu->dma.cmd &= ~EDU_DMA_RUN;
-    if (edu->dma.cmd & EDU_DMA_IRQ) {
+    if(use_dma)
         edu_raise_irq(edu, DMA_IRQ);
-    }
+    else
+        edu_raise_irq(edu, LOCAL_DMA_IRQ);
+}
+
+
+static void pim_dma_timer(void *opaque)
+{
+    pim_timer(opaque, DMA_START, DMA_SIZE);
+    atomic_set(&dma_running, false);
+}
+
+static void pim_local_timer(void *opaque)
+{
+    pim_timer(opaque, LOCAL_DMA_START, LOCAL_DMA_SIZE);
+    atomic_set(&local_dma_running, false);
 }
 
 static void dma_rw(PIMState *edu, bool write, dma_addr_t *val, dma_addr_t *dma,
                 bool timer)
 {
-    if (write && (edu->dma.cmd & EDU_DMA_RUN)) {
+    if (write && atomic_read(&dma_running)) {
         printf("DMA_RW RETURN\n");
         return;
     }
@@ -213,8 +328,28 @@ static void dma_rw(PIMState *edu, bool write, dma_addr_t *val, dma_addr_t *dma,
     }
 
     if (timer) {
-        // edu_dma_timer(edu);
+        atomic_set(&dma_running, true);
         timer_mod(&edu->dma_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+    }
+}
+
+static void local_dma_rw(PIMState *edu, bool write, dma_addr_t *val,
+                dma_addr_t *dma, bool timer)
+{
+    if (write && atomic_read(&local_dma_running)) {
+        printf("LOCAL_DMA_RW RETURN\n");
+        return;
+    }
+
+    if (write) {
+        *dma = *val;
+    } else {
+        *val = *dma;
+    }
+
+    if (timer) {
+        atomic_set(&local_dma_running, true);
+        timer_mod(&edu->local_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
     }
 }
 
@@ -223,13 +358,14 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
     PIMState *edu = opaque;
     uint64_t val = ~0ULL;
 
-    if (addr < 0x80 && size != 4) {
-        return val;
-    }
+    // printf("MMIO read %lx, size %u\n", addr, size);
+    // if (addr < 0x80 && size != 4) {
+    //     return val;
+    // }
 
-    if (addr >= 0x80 && addr <= 0x98 && size != 4 && size != 8) {
-        return val;
-    }
+    // if (addr >= 0x80 && addr <= 0x98 && size != 4 && size != 8) {
+    //     return val;
+    // }
 
     switch (addr) {
         case 0x00:
@@ -246,34 +382,23 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
             // printf("Read 0x08 (fact), return %lx\n", val);
             qemu_mutex_unlock(&edu->thr_mutex);
             break;
-        case 0x20:
+        case 0x10:
             val = atomic_read(&edu->status);
             // printf("Read 0x20, return %lx. If 1, factorial, if 0, IR finished factorial\n", val);
             break;
-        case 0x24:
+        case 0x18:
             val = edu->irq_status;
-            break;
-        case 0x80:
-            dma_rw(edu, false, &val, &edu->dma.src, false);
-            // printf("Read 0x80, (src DMA) return %lx\n", val);
-            break;
-        case 0x88:
-            dma_rw(edu, false, &val, &edu->dma.dst, false);
-            // printf("Read 0x88, (dest DMA) return %lx\n", val);
-            break;
-        case 0x90:
-            dma_rw(edu, false, &val, &edu->dma.cnt, false);
-            // printf("Read 0x90, (size DMA) return %lx\n", val);
-            break;
-        case 0x98: /* This is to read the value of the register, NOT THE DMA */
-            dma_rw(edu, false, &val, &edu->dma.cmd, false);
-            // printf("Read 0x98, (cmd DMA) return %lx. pos 1, start, pos 2 dir, pos 4 IR enable\n", val);
             break;
     }
 
-    if(addr >= 0x110 && addr <= (0x110 + DMA_SIZE - sizeof(uint64_t))){
+    if(addr >= 0x110 && addr <= (0x110 + DMA_SIZE - sizeof(uint32_t))){
             val = *((uint64_t *) &edu->dma_buf[addr - 0x110]);
-            // printf("Read 0x%lx, (read buff) return buffer %lu\n", addr, val);
+            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr, val);
+    }
+
+    if(addr >= 0x1110 && addr <= (0x1110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){
+            val = *((uint64_t *) &edu->local_dma_buf[addr - 0x1110]);
+            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr, val);
     }
 
     return val;
@@ -283,21 +408,12 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                 unsigned size)
 {
     PIMState *edu = opaque;
-
-    if (addr < 0x80 && size != 4) {
-        return;
-    }
-
-    if (addr >= 0x80 && size != 4 && size != 8) {
-        printf("Size %u not accepted for addr >= 0x80\n", size);
-        return;
-    }
+    // printf("MMIO write %lx, size %u\n", addr, size);
 
     switch (addr) {
     case 0x04:
         edu->addr4 = ~val;
         // printf("Write 0x04 (negation), set %x\n", edu->addr4);
-
         break;
     case 0x08:
         if (atomic_read(&edu->status) & EDU_STATUS_COMPUTING) {
@@ -312,117 +428,106 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         qemu_cond_signal(&edu->thr_cond);
         qemu_mutex_unlock(&edu->thr_mutex);
         // printf("Write 0x08 (fact), set %lx, status OR with COMPUTING\n", val);
-
         break;
-    case 0x20:
+    case 0x10:
         if (val & EDU_STATUS_IRQFACT) {
             atomic_or(&edu->status, EDU_STATUS_IRQFACT);
         } else {
             atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
         }
         // printf("Write 0x20, set status %x\n", edu->status);
-
         break;
-    case 0x60:
+    case 0x20:
         edu_raise_irq(edu, val);
         // printf("Write 0x60, edu raise irq\n");
         break;
-    case 0x64:
+    case 0x24:
         edu_lower_irq(edu, val);
         // printf("Write 0x64, edu lower irq\n");
         break;
-    case 0x80:
+    case 0x30:
         // printf("Write 0x80, (src DMA) set %lx size %u\n", val, size);
         dma_rw(edu, true, &val, &edu->dma.src, false);
-
         break;
-    case 0x88:
+    case 0x38:
         dma_rw(edu, true, &val, &edu->dma.dst, false);
         // printf("Write 0x88, (dest DMA) set %lx\n", val);
-
         break;
-    case 0x90:
+    case 0x40:
         dma_rw(edu, true, &val, &edu->dma.cnt, false);
         // printf("Write 0x90, (size DMA) set %lx\n", val);
-
         break;
-    case 0x98:
-        if (!(val & EDU_DMA_RUN)) {
+    case 0x48:
+        switch (val >> 1)
+        {
+        case COPY_CMD:
+            // printf("Copy command issued, val %lx\n", val);
+            dma_rw(edu, true, &val, &edu->dma.cmd, true);
+            break;
+
+        default:
+            printf("Command %lu not recognized\n", val);
             break;
         }
-        dma_rw(edu, true, &val, &edu->dma.cmd, true);
         // printf("Write 0x98, (cmd DMA) set %lx. pos 1, start, pos 2 dir, pos 4 IR enable\n", val);
-
         break;
-    case 0x110:
-        // printf("Write 0x111, (memset) set %lx\n", val);
-
-        if(val != 0x07){ // start | edu->ram | irq
-            printf("Value has to be 0x07, it's %lx\n", val);
-            val = 0x07;
-        }
-
-        dma_rw(edu, true, &val, &edu->dma.cmd, true);
-        break;
-    case 0x118:
+    case 0x6b:
         memset(edu->dma_buf, val, DMA_SIZE);
         // printf("Buffer initialized to %lu\n", val);
         break;
+    case 0x70:
+        // printf("Write 0x70, (src DMA) set %lx size %u\n", val, size);
+        local_dma_rw(edu, true, &val, &edu->local_dma.src, false);
+        break;
+    case 0x78:
+        // printf("Write 0x78, (dest DMA) set %lx size %u\n", val, size);
+        local_dma_rw(edu, true, &val, &edu->local_dma.dst, false);
+        break;
+    case 0x80:
+        // printf("Write 0x80, (size DMA) set %lx size %u\n", val, size);
+        local_dma_rw(edu, true, &val, &edu->local_dma.cnt, false);
+        break;
+    case 0x88:
+        switch (val >> 1)
+        {
+        case COPY_CMD:
+            local_dma_rw(edu, true, &val, &edu->local_dma.cmd, true);
+            break;
 
-    case 0x120: {
-            // This seems to work/
-            char buff[5];
-
-            // memset(buff, 'b', 5);
-            // address_space_write(&dev_addr_space, 0x0, MEMTXATTRS_UNSPECIFIED, buff, 5);
-            // memset(buff, 0, 5);
-            // address_space_read(&dev_addr_space, 0x0, MEMTXATTRS_UNSPECIFIED, buff, 5);
-            // printf("Buffer %.5s\n", buff); // reads PIM memory?
-
-
-            memset(buff, 0, 5);
-            int res = pci_dma_read(&edu->pdev, 0x1c0000000, buff, 5);
-            if(res){
-                perror("pci_dma_read");
-                printf("ERROR %d\n", res);
-            }
-            printf("Buffer %x\n", buff[0]); // reads system ram
-
-            memset(buff, 'a', 5);
-            res = pci_dma_write(&edu->pdev, 0x1c0000000, buff, 5);
-            if(res){
-                perror("pci_dma_write");
-                printf("ERROR %d\n", res);
-            }
-            printf("WRITE Buffer OK\n"); // reads system ram
-
-            memset(buff, 0, 5);
-            res = pci_dma_read(&edu->pdev, 0x1c0000000, buff, 5);
-            if(res){
-                perror("pci_dma_read");
-                printf("ERROR %d\n", res);
-
-            }
-            printf("Buffer %x\n", buff[0]); // reads system ram
-
+        default:
+            printf("Command not recognized\n");
             break;
         }
+
+        break;
+    case 0x10b:
+        memset(edu->local_dma_buf, val, LOCAL_DMA_SIZE);
+        // printf("Buffer initialized to %lu\n", val);
+        break;
     }
 
+    if(addr >= 0x110 && addr <= (0x110 + DMA_SIZE - sizeof(uint32_t))){
+            *((uint64_t *) &edu->dma_buf[addr - 0x110]) = val;
+            // printf("Write 0x%lx, (write buff) val %lx\n", addr, val);
+    }
+
+    if(addr >= 0x1110 && addr <= (0x1110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){
+            *((uint64_t *) &edu->local_dma_buf[addr - 0x1110]) = val;
+            // printf("Write 0x%lx, (write buff) val %lx\n", addr, val);
+    }
 
 }
 
-__attribute__ ((unused))
 static const MemoryRegionOps edu_mmio_ops = {
     .read = edu_mmio_read,
     .write = edu_mmio_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 8,
     },
     .impl = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 8,
     },
 
@@ -467,11 +572,11 @@ static void *edu_fact_thread(void *opaque)
         atomic_and(&edu->status, ~EDU_STATUS_COMPUTING);
 
         if (atomic_read(&edu->status) & EDU_STATUS_IRQFACT) {
+            atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
             qemu_mutex_lock_iothread();
             edu_raise_irq(edu, FACT_IRQ);
             // printf("\tIRQ raised\n");
             qemu_mutex_unlock_iothread();
-            atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
         }
     }
 
@@ -489,22 +594,23 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
-    timer_init_ms(&edu->dma_timer, QEMU_CLOCK_VIRTUAL, edu_dma_timer, edu);
+    timer_init_ms(&edu->dma_timer, QEMU_CLOCK_VIRTUAL, pim_dma_timer, edu);
+    timer_init_ms(&edu->local_timer, QEMU_CLOCK_VIRTUAL, pim_local_timer, edu);
 
     qemu_mutex_init(&edu->thr_mutex);
     qemu_cond_init(&edu->thr_cond);
     qemu_thread_create(&edu->thread, "edu", edu_fact_thread,
                        edu, QEMU_THREAD_JOINABLE);
 
-    memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", 1 * GiB);
+    memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", LOCAL_MEM_SIZE);
     memory_region_set_enabled(&dev_memory, true);
-    // address_space_init(&dev_addr_space, &dev_memory, "p_memory");
+    address_space_init(&dev_addr_space, &dev_memory, "pim_memory_as");
 
     memory_region_init_io(&edu->mmio, OBJECT(edu), &edu_mmio_ops, edu,
                     "edu-mmio", 1 * MiB);
 
     Error *err = NULL;
-    memory_region_init_ram(&edu->ram, OBJECT(edu), "edu-ram", 1 * GiB, &err);
+    memory_region_init_ram(&edu->ram, OBJECT(edu), "edu-ram", LOCAL_MEM_SIZE, &err);
 
     if(err) {
         error_report("%s", error_get_pretty(err));
@@ -512,7 +618,6 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
     }
 
     memory_region_add_subregion(&dev_memory, 0, &edu->ram);
-
 
     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64, &edu->mmio);
 
@@ -533,6 +638,7 @@ static void pci_edu_uninit(PCIDevice *pdev)
     qemu_mutex_destroy(&edu->thr_mutex);
 
     timer_del(&edu->dma_timer);
+    timer_del(&edu->local_timer);
     msi_uninit(pdev);
 }
 
@@ -542,7 +648,9 @@ static void edu_instance_init(Object *obj)
     printf("Edu device loaded\n");
 
     edu->dma_buf = malloc(DMA_SIZE);
+    edu->local_dma_buf = malloc(LOCAL_DMA_SIZE);
     memset(edu->dma_buf, 0x0, DMA_SIZE);
+    memset(edu->local_dma_buf, 0x0, LOCAL_DMA_SIZE);
 
     // edu->dma_mask = (1UL << 28) - 1;
     // object_property_add_uint64_ptr(obj, "dma_mask",
@@ -557,8 +665,8 @@ static void edu_class_init(ObjectClass *class, void *data)
     k->realize = pci_edu_realize;
     k->exit = pci_edu_uninit;
     k->vendor_id = PCI_VENDOR_ID_QEMU;
-    k->device_id = 0x11e8;
-    k->revision = 0x10;
+    k->device_id = EDU_DEVICE_ID;
+    k->revision = 0x0;
     k->class_id = PCI_CLASS_OTHERS;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
@@ -568,6 +676,7 @@ static void edu_instance_uninit(Object *obj)
     PIMState *edu = PIM(obj);
     printf("Uninit PIM\n");
     free(edu->dma_buf);
+    free(edu->local_dma_buf);
 }
 
 static void pci_edu_register_types(void)

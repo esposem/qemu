@@ -46,48 +46,70 @@ size == 8 for the rest.
 
 0x08 (RW) : factorial computation
 	    The stored value is taken and factorial of it is put back here.
-	    This happens only after factorial bit in the status register (0x20
-	    below) is cleared.
+	    This happens only after factorial bit in the status register
+	    is cleared.
 
-0x20 (RW) : status register, bitwise OR
+0x10 (RW) : status register, bitwise OR
 	    0x01 -- computing factorial (RO)
 	    0x80 -- raise interrupt after finishing factorial computation
 
-0x24 (RO) : interrupt status register
+----------------------------------------------------------------
+
+0x18 (RO) : interrupt status register
 	    It contains values which raised the interrupt (see interrupt raise
 	    register below).
 
-0x60 (WO) : interrupt raise register
+0x20 (WO) : interrupt raise register
 	    Raise an interrupt. The value will be put to the interrupt status
 	    register (using bitwise OR).
 
-0x64 (WO) : interrupt acknowledge register
+0x24 (WO) : interrupt acknowledge register
 	    Clear an interrupt. The value will be cleared from the interrupt
 	    status register. This needs to be done from the ISR to stop
 	    generating interrupts.
 
-0x80 (RW) : DMA source address
-	    Where to perform the DMA from.
+----------------------------------------------------------------
 
-0x88 (RW) : DMA destination address
-	    Where to perform the DMA to.
+0x30 (WO) : DMA source address
+	    Where to perform the DMA from (physical address).
 
-0x90 (RW) : DMA transfer count
+0x38 (WO) : DMA destination address
+	    Where to perform the DMA to (physical address).
+
+0x40 (WO) : DMA transfer count
 	    The size of the area to perform the DMA on.
 
-0x98 (RW) : DMA command register, bitwise OR
-	    0x01 -- start transfer
-	    0x02 -- direction (0: from RAM to EDU, 1: from EDU to RAM)
-	    0x04 -- raise interrupt 0x100 after finishing the DMA
+0x48 (WO) : DMA command register, bitwise OR
+	    0x01 -- direction (0: from RAM to PIM, 1: from PIM to RAM)
+	    0x02 -- copy dest with value of source (size of count)
 
-0x110 (RO):  Read buffer at 0x40000
+0x50 - 0x6b : 28 bytes for more commands
 
-0x110 (WO): performs memset of size set in 0x90. Requires all registers
-	     of DMA set beforehand, except 0x98
+0x6b (WO):  Memsets DMA buffer at 0x40000 with given value
 
-0x118 (WO): memsets the device buffer to the given value
+----------------------------------------------------------------
 
-0x120 (WO): [temporary test to check mmap] writes the given address in the PIM local memory
+0x70 (WO) : Local DMA src memory address
+
+0x78 (WO) : Local DMA dest memory address
+
+0x80 (WO) : Local DMA transfer count
+	    The size of the area to perform the DMA on.
+
+0x88 (WO) : DMA command register, bitwise OR
+	    0x01 -- direction (0: from local RAM to PIM, 1: from PIM to local RAM)
+	    0x02 -- copy dest with value of source (size of count)
+
+0x90 - 0x10b : 28 bytes for more commands
+
+0x10b (WO):  Memsets local buffer at 0x50000
+
+----------------------------------------------------------------
+
+0x110 (RW):  Read/Writes buffer at 0x40000
+
+0x1110 (RW):  Read/Writes local buffer at 0x50000
+
 IRQ controller
 --------------
 An IRQ is generated when written to the interrupt raise register. The value
