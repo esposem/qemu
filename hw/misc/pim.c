@@ -38,7 +38,7 @@
 #define PIM(obj)        OBJECT_CHECK(PIMState, obj, TYPE_PCI_PIM_DEVICE)
 #define EDU_DEVICE_ID 0x11e8
 
-#define FACT_IRQ        0x00000001
+#define SUMM_IRQ        0x00000001
 #define DMA_IRQ         0x00000100
 #define LOCAL_DMA_IRQ   0x00000101
 
@@ -72,9 +72,9 @@ typedef struct {
     bool stopping;
 
     uint32_t addr4;
-    uint32_t fact;
+    uint32_t summ;
 #define EDU_STATUS_COMPUTING    0x01
-#define EDU_STATUS_IRQFACT      0x80
+#define EDU_STATUS_IRQSUMM      0x80
     uint32_t status;
     struct dma_state dma;
     struct dma_state local_dma;
@@ -253,6 +253,7 @@ static void pim_timer(void *opaque, uint64_t buff_start, uint64_t buff_size)
         bool buffer_included = within(src, buff_start, buff_start+buff_size);
 
         // printf("Src is %lx [%lx, %lx]\n", src, buff_start, buff_size);
+        // printf("Dest is %lx\n", state->dst);
 
         if(buffer_included) { // src is buffer_included
             src -= buff_start;
@@ -378,13 +379,13 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
             break;
         case 0x08:
             qemu_mutex_lock(&edu->thr_mutex);
-            val = edu->fact;
-            // printf("Read 0x08 (fact), return %lx\n", val);
+            val = edu->summ;
+            // printf("Read 0x08 (summ), return %lx\n", val);
             qemu_mutex_unlock(&edu->thr_mutex);
             break;
         case 0x10:
             val = atomic_read(&edu->status);
-            // printf("Read 0x20, return %lx. If 1, factorial, if 0, IR finished factorial\n", val);
+            // printf("Read 0x20, return %lx. If 1, summation, if 0, IR finished summation\n", val);
             break;
         case 0x18:
             val = edu->irq_status;
@@ -417,25 +418,26 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         break;
     case 0x08:
         if (atomic_read(&edu->status) & EDU_STATUS_COMPUTING) {
+            printf("status is still running\n");
             break;
         }
         /* EDU_STATUS_COMPUTING cannot go 0->1 concurrently, because it is only
          * set in this function and it is under the iothread mutex.
          */
         qemu_mutex_lock(&edu->thr_mutex);
-        edu->fact = val;
+        edu->summ = val;
         atomic_or(&edu->status, EDU_STATUS_COMPUTING);
         qemu_cond_signal(&edu->thr_cond);
         qemu_mutex_unlock(&edu->thr_mutex);
-        // printf("Write 0x08 (fact), set %lx, status OR with COMPUTING\n", val);
+        // printf("Write 0x08 (summ), set %lx, status OR with COMPUTING\n", val);
         break;
     case 0x10:
-        if (val & EDU_STATUS_IRQFACT) {
-            atomic_or(&edu->status, EDU_STATUS_IRQFACT);
+        if (val & EDU_STATUS_IRQSUMM) {
+            atomic_or(&edu->status, EDU_STATUS_IRQSUMM);
         } else {
-            atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
+            atomic_and(&edu->status, ~EDU_STATUS_IRQSUMM);
         }
-        // printf("Write 0x20, set status %x\n", edu->status);
+        // printf("Write 0x10, set status %x\n", edu->status);
         break;
     case 0x20:
         edu_raise_irq(edu, val);
@@ -537,7 +539,7 @@ static const MemoryRegionOps edu_mmio_ops = {
  * We purposely use a thread, so that users are forced to wait for the status
  * register.
  */
-static void *edu_fact_thread(void *opaque)
+static void *edu_summ_thread(void *opaque)
 {
     PIMState *edu = opaque;
 
@@ -558,7 +560,7 @@ static void *edu_fact_thread(void *opaque)
             break;
         }
 
-        val = edu->fact;
+        val = edu->summ;
         qemu_mutex_unlock(&edu->thr_mutex);
 
         while (val > 0) {
@@ -566,15 +568,15 @@ static void *edu_fact_thread(void *opaque)
         }
 
         qemu_mutex_lock(&edu->thr_mutex);
-        edu->fact = ret;
-        // printf("\nFact set %d\n", ret);
+        edu->summ = ret;
+        // printf("\nSumm set %d\n", ret);
         qemu_mutex_unlock(&edu->thr_mutex);
         atomic_and(&edu->status, ~EDU_STATUS_COMPUTING);
 
-        if (atomic_read(&edu->status) & EDU_STATUS_IRQFACT) {
-            atomic_and(&edu->status, ~EDU_STATUS_IRQFACT);
+        if (atomic_read(&edu->status) & EDU_STATUS_IRQSUMM) {
+            atomic_and(&edu->status, ~EDU_STATUS_IRQSUMM);
             qemu_mutex_lock_iothread();
-            edu_raise_irq(edu, FACT_IRQ);
+            edu_raise_irq(edu, SUMM_IRQ);
             // printf("\tIRQ raised\n");
             qemu_mutex_unlock_iothread();
         }
@@ -599,7 +601,7 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
 
     qemu_mutex_init(&edu->thr_mutex);
     qemu_cond_init(&edu->thr_cond);
-    qemu_thread_create(&edu->thread, "edu", edu_fact_thread,
+    qemu_thread_create(&edu->thread, "edu", edu_summ_thread,
                        edu, QEMU_THREAD_JOINABLE);
 
     memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", LOCAL_MEM_SIZE);

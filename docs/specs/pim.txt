@@ -44,14 +44,14 @@ size == 8 for the rest.
 0x04 (RW) : card liveness check
 	    It is a simple value inversion (~ C operator).
 
-0x08 (RW) : factorial computation
-	    The stored value is taken and factorial of it is put back here.
-	    This happens only after factorial bit in the status register
+0x08 (RW) : summation computation
+	    The stored value is taken and summation (sum += val--) of it is put back here.
+	    This happens only after summation bit in the status register
 	    is cleared.
 
 0x10 (RW) : status register, bitwise OR
-	    0x01 -- computing factorial (RO)
-	    0x80 -- raise interrupt after finishing factorial computation
+	    0x01 -- computing summation (RO)
+	    0x80 -- raise interrupt after finishing summation computation
 
 ----------------------------------------------------------------
 
