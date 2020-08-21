@@ -43,13 +43,11 @@
 #define LOCAL_DMA_IRQ   0x00000101
 
 #define DMA_START       0x40000
-#define DMA_SIZE        4096
-// #define DMA_SIZE        (1 << 30)
+#define DMA_SIZE        16384 /* IMPORTANT: update also pim.h and libpim.c*/
 
-#define LOCAL_MEM_SIZE        (1*GiB)
-#define LOCAL_DMA_START       0x50000
-#define LOCAL_DMA_SIZE        4096
-// #define LOCAL_DMA_SIZE        (1 << 30)
+#define LOCAL_MEM_SIZE     (1*GiB)
+#define LOCAL_DMA_START    0x50000
+#define LOCAL_DMA_SIZE     16384 /* IMPORTANT: update also pim.h and libpim.c*/
 
 #define COPY_CMD 0x1
 
@@ -231,8 +229,8 @@ static void pim_timer(void *opaque, uint64_t buff_start, uint64_t buff_size)
                 }
             } else {
                 MemTxResult res;
-                // printf("Use Local %lx\n", dst);
-                res = address_space_read(&dev_addr_space, dst, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf, state->cnt);
+                // printf("#### Use Local dest %lx src %lx cnt %lu\n", dst, state->src, state->cnt);
+                res = address_space_read(&dev_addr_space, state->src, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf, state->cnt);
 
                 if(res != MEMTX_OK){
                     printf("PIM Local memory read error!\n");
@@ -278,7 +276,7 @@ static void pim_timer(void *opaque, uint64_t buff_start, uint64_t buff_size)
                 } else {
                     MemTxResult res;
                     // printf("Use Local\n");
-                    res = address_space_write(&dev_addr_space, state->dst, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf + src, state->cnt);
+                    res = address_space_write(&dev_addr_space, state->dst, MEMTXATTRS_UNSPECIFIED, edu->local_dma_buf, state->cnt);
 
                     if(res != MEMTX_OK){
                         printf("PIM Local memory read error!\n");
@@ -359,15 +357,6 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
     PIMState *edu = opaque;
     uint64_t val = ~0ULL;
 
-    // printf("MMIO read %lx, size %u\n", addr, size);
-    // if (addr < 0x80 && size != 4) {
-    //     return val;
-    // }
-
-    // if (addr >= 0x80 && addr <= 0x98 && size != 4 && size != 8) {
-    //     return val;
-    // }
-
     switch (addr) {
         case 0x00:
             val = 0x010000edu;
@@ -393,13 +382,16 @@ static uint64_t edu_mmio_read(void *opaque, hwaddr addr, unsigned size)
     }
 
     if(addr >= 0x110 && addr <= (0x110 + DMA_SIZE - sizeof(uint32_t))){
-            val = *((uint64_t *) &edu->dma_buf[addr - 0x110]);
-            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr, val);
+            val = 0;
+            memcpy(&val, &edu->dma_buf[addr - 0x110], size);
+            // val = *((uint64_t *) &edu->dma_buf[addr - 0x110]);
+            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr - 0x110, val);
     }
 
-    if(addr >= 0x1110 && addr <= (0x1110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){
-            val = *((uint64_t *) &edu->local_dma_buf[addr - 0x1110]);
-            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr, val);
+    if(addr >= 0x4110 && addr <= (0x4110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){       val = 0;
+            memcpy(&val, &edu->local_dma_buf[addr - 0x4110], size);
+            // val = *((uint64_t *) &edu->local_dma_buf[addr - 0x4110]);
+            // printf("Read 0x%lx, (read buff) return buffer %lx\n", addr - 0x4110, val);
     }
 
     return val;
@@ -509,12 +501,14 @@ static void edu_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     }
 
     if(addr >= 0x110 && addr <= (0x110 + DMA_SIZE - sizeof(uint32_t))){
-            *((uint64_t *) &edu->dma_buf[addr - 0x110]) = val;
+            memcpy(&edu->dma_buf[addr - 0x110], &val, size);
+            // *((uint64_t *) &edu->dma_buf[addr - 0x110]) = val;
             // printf("Write 0x%lx, (write buff) val %lx\n", addr, val);
     }
 
-    if(addr >= 0x1110 && addr <= (0x1110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){
-            *((uint64_t *) &edu->local_dma_buf[addr - 0x1110]) = val;
+    if(addr >= 0x4110 && addr <= (0x4110 + LOCAL_DMA_SIZE - sizeof(uint32_t))){
+            memcpy(&edu->local_dma_buf[addr - 0x4110], &val, size);
+            // *((uint64_t *) &edu->local_dma_buf[addr - 0x4110]) = val;
             // printf("Write 0x%lx, (write buff) val %lx\n", addr, val);
     }
 

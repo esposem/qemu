@@ -108,7 +108,7 @@ size == 8 for the rest.
 
 0x110 (RW):  Read/Writes buffer at 0x40000
 
-0x1110 (RW):  Read/Writes local buffer at 0x50000
+0x4110 (RW):  Read/Writes local buffer at 0x50000
 
 IRQ controller
 --------------
