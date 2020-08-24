@@ -33,6 +33,8 @@
 #include "qapi/visitor.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "hw/qdev-clock.h"
+
 
 #define TYPE_PCI_PIM_DEVICE "pim"
 #define PIM(obj)        OBJECT_CHECK(PIMState, obj, TYPE_PCI_PIM_DEVICE)
@@ -69,6 +71,11 @@ typedef struct {
     QemuCond thr_cond;
     bool stopping;
 
+    QemuThread dma_thread;
+    QemuMutex dma_mutex;
+    QemuCond dma_cond;
+    bool dma_stopping;
+
     uint32_t addr4;
     uint32_t summ;
 #define EDU_STATUS_COMPUTING    0x01
@@ -83,7 +90,7 @@ typedef struct {
 #define EDU_DMA_FROM_PCI        0
 #define EDU_DMA_TO_PCI          1
 
-    QEMUTimer dma_timer;
+    QEMUTimer *dma_timer;
     char *dma_buf;
 
     QEMUTimer local_timer;
@@ -293,17 +300,26 @@ static void pim_timer(void *opaque, uint64_t buff_start, uint64_t buff_size)
 
     }
 
-    if(use_dma)
-        edu_raise_irq(edu, DMA_IRQ);
-    else
-        edu_raise_irq(edu, LOCAL_DMA_IRQ);
+    // if(use_dma)
+    //     edu_raise_irq(edu, DMA_IRQ);
+    // else
+        // edu_raise_irq(edu, LOCAL_DMA_IRQ);
 }
 
 
 static void pim_dma_timer(void *opaque)
 {
+    // printf("virt %ld host %ld  virtrt %ld rt %ld\n", qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL), qemu_clock_get_ms(QEMU_CLOCK_HOST), qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT), qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
     pim_timer(opaque, DMA_START, DMA_SIZE);
     atomic_set(&dma_running, false);
+}
+
+static void pim_test(void *opaque)
+{
+    PIMState *edu = opaque;
+     atomic_set(&dma_running, true);
+    qemu_cond_signal(&edu->dma_cond);
+    qemu_mutex_unlock(&edu->dma_mutex);
 }
 
 static void pim_local_timer(void *opaque)
@@ -328,7 +344,16 @@ static void dma_rw(PIMState *edu, bool write, dma_addr_t *val, dma_addr_t *dma,
 
     if (timer) {
         atomic_set(&dma_running, true);
-        timer_mod(&edu->dma_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+        // pim_dma_timer(edu);
+        // timer_mod(edu->dma_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+        //                NANOSECONDS_PER_SECOND / 10);
+
+
+        qemu_cond_signal(&edu->dma_cond);
+        qemu_mutex_unlock(&edu->dma_mutex);
+
+        // timer_mod(&edu->dma_timer, 10000000);
+        // printf("virt %ld host %ld  virtrt %ld rt %ld\n", qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL), qemu_clock_get_ms(QEMU_CLOCK_HOST), qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT), qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
     }
 }
 
@@ -349,6 +374,7 @@ static void local_dma_rw(PIMState *edu, bool write, dma_addr_t *val,
     if (timer) {
         atomic_set(&local_dma_running, true);
         timer_mod(&edu->local_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+        // pim_local_timer(edu);
     }
 }
 
@@ -579,6 +605,38 @@ static void *edu_summ_thread(void *opaque)
     return NULL;
 }
 
+static void *edu_dma_thread(void *opaque)
+{
+    PIMState *edu = opaque;
+
+    while (1) {
+
+        qemu_mutex_lock(&edu->dma_mutex);
+        // printf("\tQEMU thread locked...\n");
+        while (!atomic_read(&dma_running) && !edu->dma_stopping) {
+            qemu_cond_wait(&edu->dma_cond, &edu->dma_mutex);
+        }
+        // printf("\tQEMU thread unlocked...\n");
+
+
+        if (edu->dma_stopping) {
+            qemu_mutex_unlock(&edu->dma_mutex);
+            break;
+        }
+
+        pim_dma_timer(opaque);
+
+        qemu_mutex_unlock(&edu->dma_mutex);
+
+        qemu_mutex_lock_iothread();
+        edu_raise_irq(edu, DMA_IRQ);
+        // printf("\tIRQ raised\n");
+        qemu_mutex_unlock_iothread();
+    }
+
+    return NULL;
+}
+
 static void pci_edu_realize(PCIDevice *pdev, Error **errp)
 {
     PIMState *edu = PIM(pdev);
@@ -590,12 +648,19 @@ static void pci_edu_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
-    timer_init_ms(&edu->dma_timer, QEMU_CLOCK_VIRTUAL, pim_dma_timer, edu);
+    // timer_init_ms(&edu->dma_timer, QEMU_CLOCK_VIRTUAL, pim_test, edu);
+    edu->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pim_test, edu);
     timer_init_ms(&edu->local_timer, QEMU_CLOCK_VIRTUAL, pim_local_timer, edu);
 
     qemu_mutex_init(&edu->thr_mutex);
     qemu_cond_init(&edu->thr_cond);
     qemu_thread_create(&edu->thread, "edu", edu_summ_thread,
+                       edu, QEMU_THREAD_JOINABLE);
+
+
+    qemu_mutex_init(&edu->dma_mutex);
+    qemu_cond_init(&edu->dma_cond);
+    qemu_thread_create(&edu->dma_thread, "edu_dma", edu_dma_thread,
                        edu, QEMU_THREAD_JOINABLE);
 
     memory_region_init(&dev_memory, OBJECT(edu), "pim_memory", LOCAL_MEM_SIZE);
@@ -627,13 +692,24 @@ static void pci_edu_uninit(PCIDevice *pdev)
     qemu_mutex_lock(&edu->thr_mutex);
     edu->stopping = true;
     qemu_mutex_unlock(&edu->thr_mutex);
+
+    qemu_mutex_lock(&edu->dma_mutex);
+    edu->dma_stopping = true;
+    qemu_mutex_unlock(&edu->dma_mutex);
+
     qemu_cond_signal(&edu->thr_cond);
     qemu_thread_join(&edu->thread);
+
+    qemu_cond_signal(&edu->dma_cond);
+    qemu_thread_join(&edu->dma_thread);
 
     qemu_cond_destroy(&edu->thr_cond);
     qemu_mutex_destroy(&edu->thr_mutex);
 
-    timer_del(&edu->dma_timer);
+    qemu_cond_destroy(&edu->dma_cond);
+    qemu_mutex_destroy(&edu->dma_mutex);
+
+    timer_del(edu->dma_timer);
     timer_del(&edu->local_timer);
     msi_uninit(pdev);
 }
