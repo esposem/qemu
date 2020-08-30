@@ -166,3 +166,4 @@ trace-ust-all.c
 
 virtiofsd
 fedora.qcow2
+.vscode
