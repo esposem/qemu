@@ -21,6 +21,7 @@
 #include "qemu/host-utils.h"
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
+#include "exec/helper-head.h"
 #include "fpu/softfloat.h"
 #include "internals.h"
 

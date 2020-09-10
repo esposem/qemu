@@ -18,6 +18,8 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "exec/helper-gen.h"
+
 static bool trans_illegal(DisasContext *ctx, arg_empty *a)
 {
     gen_exception_illegal(ctx);
@@ -164,6 +166,30 @@ static bool trans_lw(DisasContext *ctx, arg_lw *a)
     return gen_load(ctx, a, MO_TESL);
 }
 
+static bool trans_bbop(DisasContext *ctx, arg_bbop *a)
+{
+    printf("bbop src1:%d src2:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rs3, a->rd);
+    
+    TCGv src1 = tcg_temp_new();
+    TCGv src2 = tcg_temp_new();
+    TCGv size = tcg_temp_new();
+    TCGv dest = tcg_temp_new();
+
+    gen_get_gpr(src1, a->rs1);
+    gen_get_gpr(src2, a->rs2);
+    gen_get_gpr(dest, a->rs3);
+    gen_get_gpr(size, a->rd);
+
+    gen_helper_bbop(size, cpu_env, src1, src2, dest, size);
+
+    gen_set_gpr(a->rd, size);
+    tcg_temp_free(src1);
+    tcg_temp_free(src2);
+    tcg_temp_free(size);
+    tcg_temp_free(dest);
+    return true;
+}
+
 static bool trans_lbu(DisasContext *ctx, arg_lbu *a)
 {
     return gen_load(ctx, a, MO_UB);
@@ -223,6 +249,8 @@ static bool trans_sd(DisasContext *ctx, arg_sd *a)
 
 static bool trans_addi(DisasContext *ctx, arg_addi *a)
 {
+    // if(a->imm == 0 && a->rd == 0 && a->rs1 == 0)
+    //     printf("FOUND\n");
     return gen_arith_imm_fn(ctx, a, &tcg_gen_addi_tl);
 }
 
