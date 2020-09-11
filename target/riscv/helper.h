@@ -5,6 +5,8 @@ DEF_HELPER_2(raise_exception, noreturn, env, i32)
 DEF_HELPER_FLAGS_2(set_rounding_mode, TCG_CALL_NO_WG, void, env, i32)
 
 DEF_HELPER_5(bbop, tl, env, tl, tl, tl, tl)
+DEF_HELPER_4(rcc, tl, env, tl, tl, tl)
+DEF_HELPER_3(rci, tl, env, tl, tl)
 
 /* Floating Point - fused */
 DEF_HELPER_FLAGS_4(fmadd_s, TCG_CALL_NO_RWG, i64, env, i64, i64, i64)
