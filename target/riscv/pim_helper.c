@@ -46,10 +46,10 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
     void *src_addr;
     void *dest_addr;
 
-    printf("rcc src %lx dest %lx size %lx\n",
-            (uint64_t) src,
-            (uint64_t) dest,
-            (uint64_t) size);
+    // printf("rcc src %lx dest %lx size %lx\n",
+    //         (uint64_t) src,
+    //         (uint64_t) dest,
+    //         (uint64_t) size);
 
 #if defined(CONFIG_USER_ONLY)
     src_addr = g2h(src);
@@ -94,9 +94,9 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
 {
     void *dest_addr;
 
-    printf("rci src %lx size %lx\n",
-            (uint64_t) dest,
-            (uint64_t) size);
+    // printf("rci src %lx size %lx\n",
+    //         (uint64_t) dest,
+    //         (uint64_t) size);
 
 #if defined(CONFIG_USER_ONLY)
     dest_addr = g2h(dest);

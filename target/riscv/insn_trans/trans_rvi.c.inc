@@ -192,7 +192,7 @@ static bool trans_bbop(DisasContext *ctx, arg_bbop *a)
 
 static bool trans_rcc(DisasContext *ctx, arg_rcc *a)
 {
-    printf("rcc src:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rd);
+    // printf("rcc src:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rd);
 
     TCGv src = tcg_temp_new();
     TCGv dest = tcg_temp_new();
@@ -214,7 +214,7 @@ static bool trans_rcc(DisasContext *ctx, arg_rcc *a)
 
 static bool trans_rci(DisasContext *ctx, arg_rci *a)
 {
-    printf("rci dest:%d size:%d ret:%d\n", a->rs1, a->rs2, a->rd);
+    // printf("rci dest:%d size:%d ret:%d\n", a->rs1, a->rs2, a->rd);
 
     TCGv dest = tcg_temp_new();
     TCGv size = tcg_temp_new();
