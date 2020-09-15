@@ -290,8 +290,6 @@ static bool trans_sd(DisasContext *ctx, arg_sd *a)
 
 static bool trans_addi(DisasContext *ctx, arg_addi *a)
 {
-    // if(a->imm == 0 && a->rd == 0 && a->rs1 == 0)
-    //     printf("FOUND\n");
     return gen_arith_imm_fn(ctx, a, &tcg_gen_addi_tl);
 }
 
