@@ -8,6 +8,20 @@
 #include "fpu/softfloat.h"
 #include "internals.h"
 
+/*
+    8 banks
+    2^11 column per row
+    2^14 rows
+    1 channel
+
+    [31] 		channel
+    [30:17]		row
+    [16:9]		high col
+    [8:6]		bank
+    [5:3]		low col
+    [2:0]		byte in bus
+*/
+
 target_ulong helper_bbop(CPURISCVState *env, target_ulong src1,
                          target_ulong src2, target_ulong dest,
                          target_ulong size)
