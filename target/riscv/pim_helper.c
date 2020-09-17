@@ -21,35 +21,92 @@
     [5:3]		low col
     [2:0]		byte in bus
 */
+#if !defined(CONFIG_USER_ONLY)
+/* An access can cover an arbitrary # of pages, so try to save them all */
+typedef struct RISCVAccess {
+    void **h_pages;
+    target_ulong *addr_pages;
+    target_ulong *sz_pages;
+    target_ulong n_pages;
+} RISCVAccess;
+
+static void init_riscv_access(RISCVAccess *access, int n_pages)
+{
+    access->n_pages = n_pages;
+    /* multiply by 2 because it can cross page boundary */
+    access->h_pages = malloc(sizeof(void *) * n_pages * 2);
+    g_assert(access->h_pages);
+    access->addr_pages = malloc(sizeof(target_ulong *) * n_pages * 2);
+    g_assert(access->addr_pages);
+    access->sz_pages = malloc(sizeof(target_ulong *) * n_pages * 2);
+    g_assert(access->sz_pages);
+}
+
+static void del_riscv_access(RISCVAccess *access)
+{
+    access->n_pages = 0;
+    free(access->h_pages);
+    free(access->addr_pages);
+    free(access->sz_pages);
+}
+
+// #if 0
+static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
+                           target_ulong dest, target_ulong size,
+                           int mmu_idx, int ra)
+{
+    uint32_t k = 0;
+    target_ulong sz, remaining, remaining_sz;
+    // printf("MAX Pages %ld\n", (uint64_t) n_pages *2);
+
+    while (size > 0) {
+        /* size that fits inside a page (taking into account offset) */
+        sz = MIN(size, -(dest | TARGET_PAGE_MASK));
+
+        /*
+         * probe_access: tries to see in the TLB the hw address
+         * (that corresponds to a host pointer)
+         */
+        printf("####Address %lu size %lu\n", (uint64_t) dest, (uint64_t) sz);
+        access->h_pages[k] = probe_write(env, dest, sz,
+                                    mmu_idx, GETPC());
+        access->addr_pages[k] = dest;
+        access->sz_pages[k++] = sz;
+
+        remaining = 0;
+        remaining_sz = MIN(size, TARGET_PAGE_SIZE);
+
+        if (sz != remaining_sz) {
+            /*
+             *in this case, it means access crosses the page boundary.
+             * Do the same, but adjust virtual address and size
+             */
+            remaining = remaining_sz - sz;
+            printf("####--Address %lu size %lu\n", (uint64_t) dest+sz, (uint64_t) remaining);
+
+            access->h_pages[k] = probe_write(env, dest + sz, remaining,
+                                             mmu_idx, GETPC());
+
+            access->addr_pages[k] = dest + sz;
+            access->sz_pages[k++] = remaining;
+        }
+
+        size -= (sz + remaining);
+        dest += (sz + remaining);
+    }
+
+    g_assert(size == 0);
+
+    return k;
+}
+// #endif
+
+#endif
 
 target_ulong helper_bbop(CPURISCVState *env, target_ulong src1,
                          target_ulong src2, target_ulong dest,
                          target_ulong size)
 {
-//     printf("hallo src %lx src2 %lx dest %lx size %lx\n", (uint64_t) src1, (uint64_t) src2, (uint64_t) dest, (uint64_t) size);
-
-
-// #if defined(CONFIG_USER_ONLY)
-//     char *src1_addr = (char *) g2h(src1); // read
-//     if(src2){
-
-//     }
-//     char *src2_addr = (char *) g2h(src2); // read
-//     printf("Read |%s|\n", addr);
-// #else
-//         char *addr = (char *)tlb_vaddr_to_host(env, src1, 0, cpu_mmu_index(env, 0)); // read
-// #endif
-
-//     char *ddest = (char *)tlb_vaddr_to_host(env, dest, 0, cpu_mmu_index(env, 0));
-
-
-//     memcpy(ddest, addr, size);
-
-// #ifdef CONFIG_SOFTMMU
-//     // TODO: test this
-//     helper_ret_stb_mmu(env, dest, 0, cpu_mmu_index(env, 0), GETPC());
-// #endif
-
     return size;
 }
 
@@ -59,11 +116,6 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
 {
     void *src_addr;
     void *dest_addr;
-
-    // printf("rcc src %lx dest %lx size %lx\n",
-    //         (uint64_t) src,
-    //         (uint64_t) dest,
-    //         (uint64_t) size);
 
 #if defined(CONFIG_USER_ONLY)
     src_addr = g2h(src);
@@ -76,28 +128,6 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
                                   cpu_mmu_index(env, 0));
 
     memcpy(dest_addr, src_addr, size);
-
-    // TCGMemOpIdx oi = make_memop_idx(MO_UB, mmu_idx);
-    // int i;
-
-    // if (likely(haddr)) {
-    //     memset(haddr, byte, size);
-    // } else {
-    //     /*
-    //      * Do a single access and test if we can then get access to the
-    //      * page. This is especially relevant to speed up TLB_NOTDIRTY.
-    //      */
-    //     g_assert(size > 0);
-    //     helper_ret_stb_mmu(env, vaddr, byte, oi, ra);
-    //     haddr = tlb_vaddr_to_host(env, vaddr, MMU_DATA_STORE, mmu_idx);
-    //     if (likely(haddr)) {
-    //         memset(haddr + 1, byte, size - 1);
-    //     } else {
-    //         for (i = 1; i < size; i++) {
-    //             helper_ret_stb_mmu(env, vaddr + i, byte, oi, ra);
-    //         }
-    //     }
-    // }
 #endif
     return size;
 }
@@ -106,42 +136,109 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
 target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
                         target_ulong size)
 {
-    void *dest_addr;
 
-    // printf("rci src %lx size %lx\n",
-    //         (uint64_t) dest,
-    //         (uint64_t) size);
+#define MEMSET_BYTE 1
+
+    // void *dest_addr;
+    target_ulong old_size = size;
+
+    g_assert(size != 0);
 
 #if defined(CONFIG_USER_ONLY)
+    void *dest_addr;
+
+    /* User: no MMU, just copy the data from one side to the other */
     dest_addr = g2h(dest);
-    memset(dest_addr, 0, size);
+    memset(dest_addr, MEMSET_BYTE, size);
+
 #else
-    dest_addr = tlb_vaddr_to_host(env, dest, MMU_DATA_STORE,
-                                  cpu_mmu_index(env, 0));
+    /*
+     * System: MMU, make sure to get the correct pages (host addresses)
+     * via the TLB, and load missing pages if needed.
+     */
 
-    memset(dest_addr, 0, size);
+    RISCVAccess access;
+    int n_pages, mmu_idx, found_pages;
+    TCGMemOpIdx oi;
 
-    // TCGMemOpIdx oi = make_memop_idx(MO_UB, mmu_idx);
-    // int i;
+    mmu_idx = cpu_mmu_index(env, false);
+    oi = make_memop_idx(MO_UB, mmu_idx);
 
-    // if (likely(haddr)) {
-    //     memset(haddr, byte, size);
-    // } else {
-    //     /*
-    //      * Do a single access and test if we can then get access to the
-    //      * page. This is especially relevant to speed up TLB_NOTDIRTY.
-    //      */
-    //     g_assert(size > 0);
-    //     helper_ret_stb_mmu(env, vaddr, byte, oi, ra);
-    //     haddr = tlb_vaddr_to_host(env, vaddr, MMU_DATA_STORE, mmu_idx);
-    //     if (likely(haddr)) {
-    //         memset(haddr + 1, byte, size - 1);
-    //     } else {
-    //         for (i = 1; i < size; i++) {
-    //             helper_ret_stb_mmu(env, vaddr + i, byte, oi, ra);
-    //         }
-    //     }
-    // }
+    n_pages = (size / TARGET_PAGE_SIZE) + 1;
+    init_riscv_access(&access, n_pages);
+
+    found_pages = find_all_pages(env, &access, dest, size, mmu_idx, GETPC());
+    printf("Found %d pages\n", found_pages);
+
+
+    int k = 0;
+    target_ulong sz, remaining, remaining_sz;
+
+    while (size > 0) {
+        /* size that fits inside a page (taking into account offset) */
+        sz = MIN(size, -(dest | TARGET_PAGE_MASK));
+
+        /*
+         * probe_access: tries to see in the TLB the hw address
+         * (that corresponds to a host pointer)
+         */
+        access.h_pages[k] = probe_access(env, dest, sz, MMU_DATA_STORE,
+                                    mmu_idx, GETPC());
+        access.addr_pages[k] = dest;
+        access.sz_pages[k++] = sz;
+
+        remaining = 0;
+        remaining_sz = MIN(size, TARGET_PAGE_SIZE);
+
+        if (sz != remaining_sz) {
+            /*
+             *in this case, it means access crosses the page boundary.
+             * Do the same, but adjust virtual address and size
+             */
+            remaining = remaining_sz - sz;
+
+            access.h_pages[k] = probe_access(env, dest + sz, remaining,
+                                     MMU_DATA_STORE, mmu_idx, GETPC());
+
+            access.addr_pages[k] = dest + sz;
+            access.sz_pages[k++] = remaining;
+        }
+
+        size -= (sz + remaining);
+        dest += (sz + remaining);
+    }
+
+    g_assert(size == 0);
+
+    found_pages = k;
+
+    for (int i=0; i < found_pages; i++) {
+        if (likely(access.h_pages[i])) {
+            /* There is a page in TLB, just memset it */
+            memset(access.h_pages[i], MEMSET_BYTE, access.sz_pages[i]);
+        } else {
+            /*
+            * Do a single access and test if we can then get access to the
+            * page. This is especially relevant to speed up TLB_NOTDIRTY.
+            */
+            g_assert(access.sz_pages[i] > 0);
+            helper_ret_stb_mmu(env, access.addr_pages[i], MEMSET_BYTE, oi,
+                               GETPC());
+            access.h_pages[i] = tlb_vaddr_to_host(env, access.addr_pages[i],
+                                          MMU_DATA_STORE, mmu_idx);
+            if (likely(access.h_pages[i])) {
+                /* Now there is a page in TLB, just memset it */
+                memset(access.h_pages[i] + 1, MEMSET_BYTE, access.sz_pages[i] - 1);
+            } else {
+                /* No luck, do it manually */
+                for (int j = 1; j < access.sz_pages[i]; j++) {
+                    helper_ret_stb_mmu(env, access.addr_pages[i] + j, MEMSET_BYTE, oi, GETPC());
+                }
+            }
+        }
+    }
+
+    del_riscv_access(&access);
 #endif
-    return size;
+    return old_size;
 }
