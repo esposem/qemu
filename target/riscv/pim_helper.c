@@ -56,7 +56,7 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
                            int mmu_idx, int ra)
 {
     uint32_t k = 0;
-    target_ulong sz, remaining, remaining_sz;
+    target_ulong sz;
     // printf("MAX Pages %ld\n", (uint64_t) n_pages *2);
 
     while (size > 0) {
@@ -73,26 +73,8 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
         access->addr_pages[k] = dest;
         access->sz_pages[k++] = sz;
 
-        remaining = 0;
-        remaining_sz = MIN(size, TARGET_PAGE_SIZE);
-
-        if (sz != remaining_sz) {
-            /*
-             *in this case, it means access crosses the page boundary.
-             * Do the same, but adjust virtual address and size
-             */
-            remaining = remaining_sz - sz;
-            printf("####--Address %lu size %lu\n", (uint64_t) dest+sz, (uint64_t) remaining);
-
-            access->h_pages[k] = probe_write(env, dest + sz, remaining,
-                                             mmu_idx, GETPC());
-
-            access->addr_pages[k] = dest + sz;
-            access->sz_pages[k++] = remaining;
-        }
-
-        size -= (sz + remaining);
-        dest += (sz + remaining);
+        size -= sz;
+        dest += sz;
     }
 
     g_assert(size == 0);
@@ -170,47 +152,29 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
     found_pages = find_all_pages(env, &access, dest, size, mmu_idx, GETPC());
     printf("Found %d pages\n", found_pages);
 
+    // int k = 0;
+    // target_ulong sz;
 
-    int k = 0;
-    target_ulong sz, remaining, remaining_sz;
+    // while (size > 0) {
+    //     /* size that fits inside a page (taking into account offset) */
+    //     sz = MIN(size, -(dest | TARGET_PAGE_MASK));
 
-    while (size > 0) {
-        /* size that fits inside a page (taking into account offset) */
-        sz = MIN(size, -(dest | TARGET_PAGE_MASK));
+    //     /*
+    //      * probe_access: tries to see in the TLB the hw address
+    //      * (that corresponds to a host pointer)
+    //      */
+    //     access.h_pages[k] = probe_access(env, dest, sz, MMU_DATA_STORE,
+    //                                 mmu_idx, GETPC());
+    //     access.addr_pages[k] = dest;
+    //     access.sz_pages[k++] = sz;
 
-        /*
-         * probe_access: tries to see in the TLB the hw address
-         * (that corresponds to a host pointer)
-         */
-        access.h_pages[k] = probe_access(env, dest, sz, MMU_DATA_STORE,
-                                    mmu_idx, GETPC());
-        access.addr_pages[k] = dest;
-        access.sz_pages[k++] = sz;
+    //     size -= sz;
+    //     dest += sz;
+    // }
 
-        remaining = 0;
-        remaining_sz = MIN(size, TARGET_PAGE_SIZE);
+    // g_assert(size == 0);
 
-        if (sz != remaining_sz) {
-            /*
-             *in this case, it means access crosses the page boundary.
-             * Do the same, but adjust virtual address and size
-             */
-            remaining = remaining_sz - sz;
-
-            access.h_pages[k] = probe_access(env, dest + sz, remaining,
-                                     MMU_DATA_STORE, mmu_idx, GETPC());
-
-            access.addr_pages[k] = dest + sz;
-            access.sz_pages[k++] = remaining;
-        }
-
-        size -= (sz + remaining);
-        dest += (sz + remaining);
-    }
-
-    g_assert(size == 0);
-
-    found_pages = k;
+    // found_pages = k;
 
     for (int i=0; i < found_pages; i++) {
         if (likely(access.h_pages[i])) {
