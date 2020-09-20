@@ -28,3 +28,7 @@ trace-ust-all.c
 /target/arm/decode-sve.inc.c
 .vscode
 virtiofsd
+scripts/qapi/__pycache__/
+scripts/tracetool/__pycache__/
+scripts/tracetool/backend/__pycache__/
+scripts/tracetool/format/__pycache__/
