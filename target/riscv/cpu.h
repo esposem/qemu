@@ -229,6 +229,11 @@ struct CPURISCVState {
 
     float_status fp_status;
 
+    QEMUTimer *op_timer;
+    QemuMutex op_mutex;
+    QemuCond op_cond;
+    int pages_in_row;
+
     /* Fields from here on are preserved across CPU reset. */
     QEMUTimer *timer; /* Internal timer */
 };
@@ -250,6 +255,22 @@ struct RISCVCPUClass {
     DeviceRealize parent_realize;
     DeviceReset parent_reset;
 };
+typedef struct dram_element_info {
+    uint64_t mask;
+    uint8_t bits[3];
+    int8_t offsets[3];
+    uint8_t n_sections;
+    uint64_t size;
+} dram_element_info;
+
+typedef struct dram_cpu_info {
+    dram_element_info channel;
+    dram_element_info rank;
+    dram_element_info bank;
+    dram_element_info row;
+    dram_element_info subarr;
+    dram_element_info col;
+} dram_cpu_info;
 
 /**
  * RISCVCPU:
@@ -263,6 +284,8 @@ struct RISCVCPU {
     /*< public >*/
     CPUNegativeOffsetState neg;
     CPURISCVState env;
+
+    dram_cpu_info dram_info;
 
     /* Configuration Settings */
     struct {

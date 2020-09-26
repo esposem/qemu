@@ -1,0 +1,85 @@
+# comments starting with # and blank lines are ignored.
+
+# The index of the least significant bit is 0.
+
+# Keywords
+# Please use the following bigrams of each level:
+# Channel:      chan
+# Rank:         rank
+# Bank:         bank
+# Subarray:     subarr
+# Row:          row
+# Column:       col
+
+# Bit assignments
+# bank 2 = 13
+# BankAddress[2] := PhysicalAddress[13]
+
+# Array assignments
+# bank  2:0 = 5:3
+# BankAddress[2:0] := PhysicalAddress[5:3]
+
+############################
+# Examples
+############################
+
+# Standard DDR3, row interleaving, 8 banks, 32k rows per bank,
+# 64 subarr per bank, each row is 4K
+# Number of bits     32
+# Channel             1
+# Rank                1
+# Bank                3
+# Row                15
+# Subarray            6 (subset of row)
+# Column             12
+
+# col     11:0 = 11:0
+# bank    2:0 = 14:12
+# row     14:0 = 29:15
+# subarr  5:0 = 29:24
+# rank    0 = 30
+# chan    0 = 31
+
+
+# Standard DDR3, cache line (64K) interleaving, 8 banks, 32k rows per bank,
+# 64 subarr per bank, each row is 4K
+# Number of bits     32
+# Channel             1
+# Rank                1
+# Bank                3
+# Row                15
+# Subarray            6 (subset of row)
+# Column             12
+
+# col     5:0 = 5:0
+# col     11:6 = 14:9
+# bank    2:0 = 8:6
+# row     14:0 = 29:15
+# subarr  5:0 = 29:24
+# rank    0 = 30
+# chan    0 = 31
+
+##########################################
+
+# 8k row
+# col     12:0 = 12:0
+# bank    2:0 = 15:13
+# row     14:0 = 30:16
+# subarr  5:0 = 30:25
+# rank    0 = 31
+# chan    0 = 32
+
+# 2k row
+# col     10:0 = 10:0
+# bank    2:0 = 13:11
+# row     14:0 = 28:14
+# subarr  5:0 = 28:23
+# rank    0 = 29
+# chan    0 = 30
+
+col     11:0 = 11:0
+bank    2:0 = 14:12
+row     14:0 = 29:15
+subarr  5:0 = 29:24
+rank    0 = 30
+chan    0 = 31
