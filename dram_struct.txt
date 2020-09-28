@@ -77,9 +77,17 @@
 # rank    0 = 29
 # chan    0 = 30
 
-col     11:0 = 11:0
-bank    2:0 = 14:12
-row     14:0 = 29:15
-subarr  5:0 = 29:24
-rank    0 = 30
-chan    0 = 31
+# 4k row
+# col     11:0 = 11:0
+# bank    2:0 = 14:12
+# row     14:0 = 29:15
+# subarr  5:0 = 29:24
+# rank    0 = 30
+# chan    0 = 31
+
+col     12:0 = 12:0
+bank    2:0 = 15:13
+row     14:0 = 30:16
+subarr  5:0 = 30:25
+rank    0 = 31
+chan    0 = 32
