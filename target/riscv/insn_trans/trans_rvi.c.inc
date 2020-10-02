@@ -233,6 +233,20 @@ static bool trans_rci(DisasContext *ctx, arg_rci *a)
     return true;
 }
 
+static bool trans_stat(DisasContext *ctx, arg_stat *a)
+{
+    TCGv val = tcg_temp_new();
+    TCGv name = tcg_temp_new();
+
+    gen_get_gpr(val, a->rd);
+    gen_get_gpr(name, a->rs1);
+    gen_helper_stat(val, cpu_env, val, name);
+
+    tcg_temp_free(val);
+    tcg_temp_free(name);
+    return true;
+}
+
 static bool trans_lbu(DisasContext *ctx, arg_lbu *a)
 {
     return gen_load(ctx, a, MO_UB);
