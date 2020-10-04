@@ -240,7 +240,7 @@ static bool trans_stat(DisasContext *ctx, arg_stat *a)
 
     gen_get_gpr(val, a->rd);
     gen_get_gpr(name, a->rs1);
-    gen_helper_stat(val, cpu_env, val, name);
+    gen_helper_stat(cpu_env, val, name);
 
     tcg_temp_free(val);
     tcg_temp_free(name);

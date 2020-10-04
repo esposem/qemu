@@ -910,7 +910,7 @@ static uint64_t calc_perc(uint64_t tot, uint64_t part)
 }
 #endif
 
-static target_ulong helper_rci_stat(CPURISCVState *env)
+static void helper_rci_stat(CPURISCVState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
     printf("----------------\nRCI STATS:\n\tProcessed:\t%ld\n\tIn PIM:\t%ld\t%ld%%\n\tIn CPU:\t%ld\t%ld%%\n\tOthers:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
@@ -931,10 +931,9 @@ static target_ulong helper_rci_stat(CPURISCVState *env)
 
     memset(&rci_stat, 0, sizeof(rci_stat));
 #endif
-    return 0;
 }
 
-static target_ulong helper_rcc_stat(CPURISCVState *env)
+static void helper_rcc_stat(CPURISCVState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
     printf("----------------\nRCC STATS:\n\tProcessed:\t%ld\n\tIn PIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tIn CPU:\t%ld\t%ld%%\n\tOthers:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
@@ -962,10 +961,9 @@ static target_ulong helper_rcc_stat(CPURISCVState *env)
 
     memset(&rcc_stat, 0, sizeof(rcc_stat));
 #endif
-    return 0;
 }
 
-target_ulong helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
+void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
 {
 
     // printf("Name %lx Val %ld\n", (uint64_t) name, (uint64_t) val);
@@ -978,16 +976,14 @@ target_ulong helper_stat(CPURISCVState *env, target_ulong val, target_ulong name
     switch (val)
     {
     case 0:
-        return helper_rci_stat(env);
+        helper_rci_stat(env);
         break;
     case 1:
-        return helper_rcc_stat(env);
+        helper_rcc_stat(env);
         break;
     
     default:
         printf("helper_stat: Command %ld not recognized!\n",(uint64_t) val);
         break;
     }
-
-    return 0;
 }

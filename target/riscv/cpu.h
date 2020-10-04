@@ -25,6 +25,8 @@
 #include "exec/cpu-defs.h"
 #include "fpu/softfloat-types.h"
 #include "qom/object.h"
+#include "hw/dram.h"
+
 
 #define TCG_GUEST_DEFAULT_MO 0
 
@@ -255,22 +257,6 @@ struct RISCVCPUClass {
     DeviceRealize parent_realize;
     DeviceReset parent_reset;
 };
-typedef struct dram_element_info {
-    uint64_t mask;
-    uint8_t bits[3];
-    int8_t offsets[3];
-    uint8_t n_sections;
-    uint64_t size;
-} dram_element_info;
-
-typedef struct dram_cpu_info {
-    dram_element_info channel;
-    dram_element_info rank;
-    dram_element_info bank;
-    dram_element_info row;
-    dram_element_info subarr;
-    dram_element_info col;
-} dram_cpu_info;
 
 /**
  * RISCVCPU:

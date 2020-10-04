@@ -11,6 +11,7 @@
 #include "qemu/module.h"
 #include "qom/object.h"
 #include "hw/core/cpu.h"
+#include "hw/dram.h"
 
 #define TYPE_MACHINE_SUFFIX "-machine"
 
@@ -260,6 +261,7 @@ struct MachineState {
     Notifier sysbus_notifier;
 
     /*< public >*/
+    dram_cpu_info dram_info;
 
     char *dtb;
     char *dumpdtb;

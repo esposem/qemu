@@ -176,6 +176,33 @@ static void create_pcie_irq_map(void *fdt, char *nodename,
                            0x1800, 0, 0, 0x7);
 }
 
+static void create_dram_fdt_el(dram_element_info *el, const char *name,  void *fdt, char *mem_name)
+{
+    char *col_name = g_strdup_printf("%d:%d", el->bits[0], el->offsets[0]);
+
+    for(int i=1; i < el->n_sections; i++) {
+        char *name = g_strdup_printf("%d:%d", el->bits[i], el->offsets[i]);
+
+        char *temp = col_name;
+        col_name = g_strjoin("|", col_name, name, NULL);
+        g_free(temp);
+        g_free(name);
+    }
+
+    qemu_fdt_setprop_string(fdt, mem_name, name, col_name);
+    g_free(col_name);
+}
+
+static void create_dram_fdt(dram_cpu_info *dram_info, void *fdt, char *mem_name)
+{
+    create_dram_fdt_el(&dram_info->col, "col", fdt, mem_name);
+    create_dram_fdt_el(&dram_info->row, "row", fdt, mem_name);
+    create_dram_fdt_el(&dram_info->subarr, "subarr", fdt, mem_name);
+    create_dram_fdt_el(&dram_info->bank, "bank", fdt, mem_name);
+    create_dram_fdt_el(&dram_info->rank, "rank", fdt, mem_name);
+    create_dram_fdt_el(&dram_info->channel, "channel", fdt, mem_name);
+}
+
 static void create_fdt(RISCVVirtState *s, const struct MemmapEntry *memmap,
     uint64_t mem_size, const char *cmdline)
 {
@@ -193,6 +220,8 @@ static void create_fdt(RISCVVirtState *s, const struct MemmapEntry *memmap,
     char *name, *clint_name, *plic_name, *clust_name;
     hwaddr flashsize = virt_memmap[VIRT_FLASH].size / 2;
     hwaddr flashbase = virt_memmap[VIRT_FLASH].base;
+
+    read_dram_info_file(&mc->dram_info);
 
     fdt = s->fdt = create_device_tree(&s->fdt_size);
     if (!fdt) {
@@ -282,6 +311,11 @@ static void create_fdt(RISCVVirtState *s, const struct MemmapEntry *memmap,
         qemu_fdt_setprop_cells(fdt, mem_name, "reg",
             addr >> 32, addr, size >> 32, size);
         qemu_fdt_setprop_string(fdt, mem_name, "device_type", "memory");
+
+
+        create_dram_fdt(&mc->dram_info, fdt, mem_name);
+        qemu_fdt_setprop_string(fdt, mem_name, "asd", "123");
+
         riscv_socket_fdt_write_id(mc, fdt, mem_name, socket);
         g_free(mem_name);
 
