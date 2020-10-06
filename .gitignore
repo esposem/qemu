@@ -32,3 +32,4 @@ scripts/qapi/__pycache__/
 scripts/tracetool/__pycache__/
 scripts/tracetool/backend/__pycache__/
 scripts/tracetool/format/__pycache__/
+.vscode-ctags
