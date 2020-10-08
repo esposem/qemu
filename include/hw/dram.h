@@ -17,6 +17,8 @@ typedef struct dram_cpu_info {
     dram_element_info row;
     dram_element_info subarr;
     dram_element_info col;
+    uint64_t offset; // shift offset. If > 0, >>. If < 0, <<.
+    uint64_t size;
 } dram_cpu_info;
 
 
@@ -54,19 +56,19 @@ static inline void init_default_dram_elements(dram_cpu_info *dram)
 {
     dram->channel.n_sections = 1;
     dram->channel.bits[0] = 1;
-    dram->channel.mask = 0x80000000;
+    dram->channel.mask = 0x100000000;
 
     dram->rank.n_sections = 1;
     dram->rank.bits[0] = 1;
-    dram->rank.mask = 0x40000000;
+    dram->rank.mask = 0x80000000;
 
     dram->row.n_sections = 1;
     dram->row.bits[0] = 15;
-    dram->row.mask = 0x3fff8000;
+    dram->row.mask = 0x7fff8000;
 
     dram->subarr.n_sections = 1;
     dram->subarr.bits[0] = 6;
-    dram->subarr.mask = 0x3f000000;
+    dram->subarr.mask = 0x7f000000;
 
     dram->bank.n_sections = 1;
     dram->bank.bits[0] = 3;
@@ -166,8 +168,15 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
             case 'r': {
                     if(op[1] == 'o') // row
                         el = &dram_info->row;
-                    else
+                    else if (op[1] == 'a')
                         el = &dram_info->rank;
+                    else if (op[1] == 'e') {
+                        char *addr = strtok(NULL, " ");
+                        char *sz = strtok(NULL, "\n");
+                        dram_info->offset = strtoull(addr, NULL, 16);
+                        dram_info->size = strtoull(sz, NULL, 16);
+                    }
+
                 break;
             }
             case 's':
@@ -190,6 +199,7 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
             print_dram_element(op, el);
         }
     }
+    printf("addr %lx sz %lx\n", dram_info->offset, dram_info->size);
     printf("---------------------\n");
 
 }

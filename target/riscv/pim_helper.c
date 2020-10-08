@@ -50,7 +50,8 @@ static void dram_el_to_dram_info(dram_element_info *el, uint32_t *info, hwaddr a
             temp = addr << el->offsets[i];
         }
 
-        *info |= temp & ((1 << el->bits[i]) - 1);
+        // *info |= temp & ((1 << el->bits[i]) - 1);
+        *info |= temp;
     }
 }
 
@@ -269,7 +270,7 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
     return k;
 }
 
-static void find_all_phys_pages(CPURISCVState *env, RISCVAccess *access)
+static void find_all_phys_pages(CPURISCVState *env, RISCVAccess *access, dram_cpu_info *info)
 {
     CPUState *cpu = env_cpu(env);
     RISCVPage *page;
@@ -282,8 +283,13 @@ static void find_all_phys_pages(CPURISCVState *env, RISCVAccess *access)
         page->phys_addr = cpu_get_phys_page_debug(cpu, align);
         offset = page->v_addr - align;
 
+        g_assert(page->phys_addr >= info->offset);
+        page->phys_addr -= info->offset;
+
         if(page->phys_addr != -1)
             page->phys_addr += offset;
+
+        // printf("Host %lx\nPhys %lx\nVirt %lx\n",(uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr);
     }
 }
 
@@ -314,6 +320,11 @@ static hwaddr get_subarray_mask(hwaddr phys, dram_cpu_info *info)
     return phys & (info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
 }
 
+static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
+{
+    return phys & (info->row.mask | info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
+}
+
 static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr start, hwaddr end)
 {
     uint64_t delay = 0;
@@ -325,11 +336,22 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     hwaddr banks = get_bank_mask(start, info);
     hwaddr bankd = get_bank_mask(end, info);
 
+    hwaddr rows = get_row_mask(start, info);
+    hwaddr rowd = get_row_mask(end, info);
+
     debug_printf("Subarr src is %lx\n", subs);
     debug_printf("Subarr dest is %lx\n", subd);
 
     debug_printf("Bank src is %lx\n", banks);
     debug_printf("Bank dest is %lx\n", bankd);
+
+    debug_printf("Row src is %lx\n", rows);
+    debug_printf("Row dest is %lx\n", rowd);
+
+    if(rows == rowd) { // same row, all in CPU
+        debug_printf("Same row, Slowdown CPU\n");
+        return CPU_DELAY(size);
+    }
 
     rcc_stat.general.in_pim += size;
 
@@ -578,14 +600,15 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
         rcc_faulted_all_dest = true;
     }
 
-    find_all_phys_pages(env, &rcc_src_access);
-    find_all_phys_pages(env, &rcc_dest_access);
+    dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+
+    find_all_phys_pages(env, &rcc_src_access, info);
+    find_all_phys_pages(env, &rcc_dest_access, info);
 
     int s = 0, d = 0;
     target_ulong ss, sd, chosen, off_ss = 0, off_sd = 0;
     RISCVPage *pages, *paged;
 
-    dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
     uint64_t row_size = info->col.size;
     row_info row_src, row_dest;
 
@@ -832,9 +855,10 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
         rci_faulted_all = true;
     }
 
-    find_all_phys_pages(env, &rci_access);
-
     dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+
+    find_all_phys_pages(env, &rci_access, info);
+
     uint64_t row_size = info->col.size;
     // printf("Row size is %ld, page size is %d\n", row_size, TARGET_PAGE_SIZE);
 
@@ -913,7 +937,7 @@ static uint64_t calc_perc(uint64_t tot, uint64_t part)
 static void helper_rci_stat(CPURISCVState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
-    printf("----------------\nRCI STATS:\n\tProcessed:\t%ld\n\tIn PIM:\t%ld\t%ld%%\n\tIn CPU:\t%ld\t%ld%%\n\tOthers:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+    printf("RCI STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
         rci_stat.tot_bytes,
 
         rci_stat.in_pim,
@@ -936,7 +960,7 @@ static void helper_rci_stat(CPURISCVState *env)
 static void helper_rcc_stat(CPURISCVState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
-    printf("----------------\nRCC STATS:\n\tProcessed:\t%ld\n\tIn PIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tIn CPU:\t%ld\t%ld%%\n\tOthers:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+    printf("RCC STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
         rcc_stat.general.tot_bytes,
 
         rcc_stat.general.in_pim,

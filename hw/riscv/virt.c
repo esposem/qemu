@@ -49,6 +49,8 @@
 # define BIOS_FILENAME "opensbi-riscv64-generic-fw_dynamic.bin"
 #endif
 
+#define USE_DRAM_INFO 1
+
 static const struct MemmapEntry {
     hwaddr base;
     hwaddr size;
@@ -178,17 +180,18 @@ static void create_pcie_irq_map(void *fdt, char *nodename,
 
 static void create_dram_fdt_el(dram_element_info *el, const char *name,  void *fdt, char *mem_name)
 {
-    char *col_name = g_strdup_printf("%d:%d", el->bits[0], el->offsets[0]);
+    char *col_name = g_strdup_printf("%lx", el->mask);
 
-    for(int i=1; i < el->n_sections; i++) {
-        char *name = g_strdup_printf("%d:%d", el->bits[i], el->offsets[i]);
+    for(int i=0; i < el->n_sections; i++) {
+        char *subname = g_strdup_printf("%d:%d", el->bits[i], el->offsets[i]);
 
         char *temp = col_name;
-        col_name = g_strjoin("|", col_name, name, NULL);
+        col_name = g_strjoin(" ", col_name, subname, NULL);
         g_free(temp);
-        g_free(name);
+        g_free(subname);
     }
 
+    printf("Property %s val %s\n", name, col_name);
     qemu_fdt_setprop_string(fdt, mem_name, name, col_name);
     g_free(col_name);
 }
@@ -304,8 +307,20 @@ static void create_fdt(RISCVVirtState *s, const struct MemmapEntry *memmap,
             g_free(cpu_name);
         }
 
-        addr = memmap[VIRT_DRAM].base + riscv_socket_mem_offset(mc, socket);
-        size = riscv_socket_mem_size(mc, socket);
+
+        #if USE_DRAM_INFO
+            addr = mc->dram_info.offset;
+            size = mc->dram_info.size;
+        #else
+            addr = memmap[VIRT_DRAM].base + riscv_socket_mem_offset(mc, socket);
+            size = riscv_socket_mem_size(mc, socket);
+        #endif
+
+        // printf("SIZE: %ld\n", size);
+        // printf("SIZE: %lx\n", size);
+        // printf("addr: %ld\n", addr);
+        // printf("addr: %lx\n", addr);
+
         mem_name = g_strdup_printf("/memory@%lx", (long)addr);
         qemu_fdt_add_subnode(fdt, mem_name);
         qemu_fdt_setprop_cells(fdt, mem_name, "reg",
@@ -314,7 +329,6 @@ static void create_fdt(RISCVVirtState *s, const struct MemmapEntry *memmap,
 
 
         create_dram_fdt(&mc->dram_info, fdt, mem_name);
-        qemu_fdt_setprop_string(fdt, mem_name, "asd", "123");
 
         riscv_socket_fdt_write_id(mc, fdt, mem_name, socket);
         g_free(mem_name);
