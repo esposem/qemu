@@ -510,7 +510,7 @@ static void riscv_cpu_init(Object *obj)
     qemu_mutex_init(&env->op_mutex);
     qemu_cond_init(&env->op_cond);
 
-    env->op_timer = timer_new_us(QEMU_CLOCK_REALTIME, dram_release_timer, env);
+    env->op_timer = timer_new_us(QEMU_CLOCK_VIRTUAL, dram_release_timer, env);
 
     env->pages_in_row = cpu->dram_info.col.size / TARGET_PAGE_SIZE;
 }

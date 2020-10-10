@@ -134,7 +134,7 @@ static inline void slow_down_by(CPURISCVState *env, size_t delay)
         return;
 
     qemu_mutex_lock(&env->op_mutex);
-    timer_mod(env->op_timer, qemu_clock_get_us(QEMU_CLOCK_REALTIME) + delay);
+    timer_mod(env->op_timer, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + delay);
     qemu_cond_wait(&env->op_cond, &env->op_mutex);
     qemu_mutex_unlock(&env->op_mutex);
 #endif
@@ -158,10 +158,9 @@ static void del_riscv_access(RISCVAccess *access)
     access->pages = NULL;
 }
 
-static hwaddr get_nocol_mask(hwaddr phys, dram_cpu_info *info)
+static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
 {
-    return phys & (info->row.mask | info->bank.mask | info->channel.mask
-                    | info->rank.mask | info->subarr.mask);
+    return phys & (info->row.mask | info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
 }
 
 static void init_rowinfo(CPURISCVState *env, dram_cpu_info *info, row_info *row, RISCVAccess *access)
@@ -193,7 +192,7 @@ static void init_rowinfo(CPURISCVState *env, dram_cpu_info *info, row_info *row,
 
         // & with all other fields because there can be
         // additional bits after MSB of the dram encoding
-        hwaddr nocol = get_nocol_mask(access->pages[i].phys_addr, info);
+        hwaddr nocol = get_row_mask(access->pages[i].phys_addr, info);
 
         debug_printf("Nocol is %lx\n", nocol);
 
@@ -238,7 +237,6 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
 {
     uint32_t k = 0;
     target_ulong sz;
-    // debug_printf("MAX Pages %ld\n", (uint64_t) n_pages *2);
 
     while (size > 0) {
         /* size that fits inside a page (taking into account offset) */
@@ -250,7 +248,7 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
          * It's a trapless lookup, so it might return NULL if it's not
          * found.
          */
-        // debug_printf("####Address %lu size %lu\n", (uint64_t) addr, (uint64_t) sz);
+        // debug_printf("#### Virt Address %lu size %lu\n", (uint64_t) addr, (uint64_t) sz);
         // access->pages[k].host_addr = probe_write(env, addr, sz, mmu_idx, GETPC());
         access->pages[k].host_addr = tlb_vaddr_to_host(env, addr, MMU_DATA_STORE, mmu_idx);
         access->pages[k].v_addr = addr;
@@ -289,7 +287,7 @@ static void find_all_phys_pages(CPURISCVState *env, RISCVAccess *access, dram_cp
         if(page->phys_addr != -1)
             page->phys_addr += offset;
 
-        // printf("Host %lx\nPhys %lx\nVirt %lx\n",(uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr);
+        debug_printf("Host %lx\nPhys %lx\nVirt %lx\n",(uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr);
     }
 }
 
@@ -318,11 +316,6 @@ static hwaddr get_bank_mask(hwaddr phys, dram_cpu_info *info)
 static hwaddr get_subarray_mask(hwaddr phys, dram_cpu_info *info)
 {
     return phys & (info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
-}
-
-static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
-{
-    return phys & (info->row.mask | info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
 }
 
 static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr start, hwaddr end)
@@ -391,7 +384,8 @@ static void print_debug_partial_row(row_pages *row, int i)
     }
 }
 
-static uint64_t calc_init_slow(uint64_t row_size, void *addr)
+// last % row_size is for the case where addr % row == 0
+static uint64_t calc_init_slow(uint64_t row_size, uint64_t addr)
 {
     return (row_size - (((uint64_t) addr) % row_size))  % row_size;
 }
@@ -462,7 +456,7 @@ static uint64_t rcc_row_gt_page(CPURISCVState *env, int s, int d, hwaddr pphys,
 }
 
 static uint64_t rcc_row_lt_page(CPURISCVState *env, hwaddr pphys,
-                            hwaddr pphyd, void *hosts, void *hostd,
+                            hwaddr pphyd,
                             target_ulong chosen, uint64_t row_size)
 {
     // remove initial and end bytes that are slow
@@ -472,8 +466,8 @@ static uint64_t rcc_row_lt_page(CPURISCVState *env, hwaddr pphys,
 
     // initial offset. If different for both
     // src and dest, there is no way we can do things faster
-    uint64_t init_slow_s = calc_init_slow(row_size, hosts);
-    uint64_t init_slow_d = calc_init_slow(row_size, hostd);
+    uint64_t init_slow_s = calc_init_slow(row_size, pphys);
+    uint64_t init_slow_d = calc_init_slow(row_size, pphyd);
 
     // delete initial offset from size, but check now
     // that each full row is in the same subarray
@@ -651,7 +645,7 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
                 if(row_size > TARGET_PAGE_SIZE){
                     delay = rcc_row_gt_page(env, s, d, pphys, pphyd, &row_src, &row_dest, chosen);
                 } else if (row_size < TARGET_PAGE_SIZE) {
-                   delay = rcc_row_lt_page(env, pphys, pphyd, hosts, hostd, chosen, row_size);
+                   delay = rcc_row_lt_page(env, pphys, pphyd, chosen, row_size);
                 } else {
                    delay = rcc_row_eq_page(env, pphys, pphyd, chosen, row_size);
                 }
@@ -717,7 +711,7 @@ static bool rci_faulted_all = false;
 static TCGMemOpIdx rci_oi;
 static rci_stats rci_stat;
 
-static uint64_t rci_row_eq_page(CPURISCVState *env, int i, uint64_t row_size)
+static uint64_t rci_row_eq_page(CPURISCVState *env, int i, uint64_t row_size, dram_cpu_info *info)
 {
 
     debug_printf("Row size == TARGET logic\n");
@@ -725,12 +719,21 @@ static uint64_t rci_row_eq_page(CPURISCVState *env, int i, uint64_t row_size)
     uint64_t delay = 0;
 
     // less than a row, do it in CPU
-    if(rci_access.pages[i].size != row_size){
+    if( rci_access.pages[i].size != row_size){
         debug_printf("Access is not aligned to row/target size, slow\n");
         delay += CPU_DELAY(rci_access.pages[i].size);
     }else {
-        rci_stat.in_pim += row_size;
-        delay += PIM_DELAY(rci_access.pages[i].size);
+        hwaddr start_row = get_row_mask(rci_access.pages[i].phys_addr, info);
+        hwaddr end_row = get_row_mask(rci_access.pages[i].phys_addr + row_size -1, info);
+        if (start_row == end_row) {
+            debug_printf("First and last byte are in same row, fast\n");
+            rci_stat.in_pim += row_size;
+            delay += PIM_DELAY(rci_access.pages[i].size);
+        } else {
+            debug_printf("Size is correct, but mapping is not in a full row, slow\n");
+            delay += CPU_DELAY(rci_access.pages[i].size);
+        }
+
     }
 
     debug_printf("Memset page %d\n", i);
@@ -744,7 +747,7 @@ static uint64_t rci_row_lt_page(CPURISCVState *env, int i, uint64_t row_size)
     uint64_t delay = 0;
 
     // initial offset
-    uint64_t init_slow = calc_init_slow(row_size, rci_access.pages->host_addr);
+    uint64_t init_slow = calc_init_slow(row_size, rci_access.pages->phys_addr);
 
     // delete initial offset from size
     uint64_t full_rows = calc_full_fast(row_size, rci_access.pages[i].size, init_slow);
@@ -860,7 +863,7 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
     find_all_phys_pages(env, &rci_access, info);
 
     uint64_t row_size = info->col.size;
-    // printf("Row size is %ld, page size is %d\n", row_size, TARGET_PAGE_SIZE);
+    debug_printf("Row size is %ld, page size is %d\n", row_size, TARGET_PAGE_SIZE);
 
     rci_stat.tot_bytes += size;
 
@@ -885,7 +888,7 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
             }else if(row_size < TARGET_PAGE_SIZE) {
                 delay = rci_row_lt_page(env, i, row_size);
             } else { /* row is equal to a page size: */
-                delay = rci_row_eq_page(env, i, row_size);
+                delay = rci_row_eq_page(env, i, row_size, info);
             }
 
             slow_down_by(env, delay);
@@ -970,7 +973,7 @@ static void helper_rcc_stat(CPURISCVState *env)
         calc_perc(rcc_stat.general.in_pim, rcc_stat.in_fpm),
 
         rcc_stat.in_psm,
-        calc_perc(rcc_stat.general.in_pim, rcc_stat.in_psm),
+        100ul - calc_perc(rcc_stat.general.in_pim, rcc_stat.in_fpm),
 
         rcc_stat.general.tot_bytes - rcc_stat.general.in_pim - rcc_stat.general.other,
         100 - calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.in_pim) -
