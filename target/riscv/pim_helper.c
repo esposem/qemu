@@ -89,20 +89,36 @@ typedef struct RISCVPage {
 } RISCVPage;
 
 typedef struct RISCVAccess {
-    RISCVPage *pages;
+    RISCVPage *pages;    // pages touched by request
     target_ulong n_pages;
+    target_ulong vaddr; // request vaddr
+    target_ulong size; // request size
 } RISCVAccess;
 
-typedef struct row_pages {
-    hwaddr addr_nocol;
-    int n_pages;
-    bool not_pim;
-} row_pages;
+struct row_data;
 
-typedef struct row_info {
-    row_pages *rows;
-    row_pages **rows_ref;
-} row_info;
+typedef struct partial_row {
+    hwaddr start;
+    uint64_t size;
+    void *host;
+    int page_parent; // page that owns it
+    struct row_data *row_parent; // row that owns it
+    QSIMPLEQ_ENTRY(partial_row) next_partial; // next partial piece (same or next page)
+    QSIMPLEQ_ENTRY(partial_row) next_same_row; // next with same row parent
+} partial_row;
+
+typedef QSIMPLEQ_HEAD(, partial_row) partial_row_list;
+
+typedef struct row_data {
+    hwaddr addr;
+    void *host;
+    uint64_t usage;
+    QSIMPLEQ_ENTRY(row_data) next_row;
+    partial_row_list partial_list;
+    int partial_list_size;
+} row_data;
+
+typedef QSIMPLEQ_HEAD(, row_data) row_data_list;
 
 typedef struct avg_t {
     uint32_t sum;
@@ -140,12 +156,14 @@ static inline void slow_down_by(CPURISCVState *env, size_t delay)
 #endif
 }
 
-static void init_riscv_access(RISCVAccess *access, target_ulong size)
+static void init_riscv_access(RISCVAccess *access, target_ulong src, target_ulong size)
 {
     uint64_t n_pages;
 
     n_pages = (size / TARGET_PAGE_SIZE) + 1;
     access->n_pages = n_pages;
+    access->vaddr = src;
+    access->size = size;
     /* multiply by 2 because it can cross page boundary */
     access->pages = malloc(sizeof(RISCVPage) * n_pages * 2);
     g_assert(access->pages);
@@ -154,6 +172,7 @@ static void init_riscv_access(RISCVAccess *access, target_ulong size)
 static void del_riscv_access(RISCVAccess *access)
 {
     access->n_pages = 0;
+    access->vaddr = 0;
     free(access->pages);
     access->pages = NULL;
 }
@@ -163,84 +182,142 @@ static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
     return phys & (info->row.mask | info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
 }
 
-static void init_rowinfo(CPURISCVState *env, dram_cpu_info *info, row_info *row, RISCVAccess *access)
+static hwaddr get_next_row(hwaddr phys, CPURISCVState *env)
 {
-    // worst case: a page in each row
-    int max_rows_here = access->n_pages;
-    row->rows = malloc(sizeof(row_pages) * max_rows_here);
-    row->rows_ref = malloc(sizeof(row_pages *) * max_rows_here);
-    g_assert(row->rows);
-    g_assert(row->rows_ref);
+    hwaddr nextel = env->lsb_nocol; // 1[0] format
+    hwaddr nextel_mask = nextel -1;
+    return (phys & (~nextel_mask)) + nextel;
+}
 
-    memset(row->rows, 0, sizeof(row_pages) * max_rows_here);
-    memset(row->rows_ref, 0, sizeof(row_pages *) * max_rows_here);
+static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
+                        RISCVAccess *access, row_data_list *row_list,
+                        partial_row_list *partial_list, int *missed)
+{
+    int missed_i = 0;
+    GHashTable *row_table;
+    hwaddr start, next, end, nocol;
+    uint64_t size_used;
+    partial_row *prow;
+    row_data *row;
 
-    int n_rows = 0;
+    row_table = g_hash_table_new(g_int64_hash, g_int64_equal);
+    QSIMPLEQ_INIT(row_list);
+    QSIMPLEQ_INIT(partial_list);
+
+    debug_printf("INIT ROWLIST %d\n", (int) access->n_pages);
 
     for (int i=0; i < access->n_pages; i++) {
 
         if (unlikely(!access->pages[i].host_addr)) {
+            debug_printf("MISSED PAGE %d?\n", i);
+            missed[missed_i++] = i;
             continue;
         }
 
-#if DRAM_DEBUG
-        uint32_t rrow;
-        dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
-        dram_el_to_dram_info(&info->row, &rrow, access->pages[i].phys_addr);
-        debug_printf("Row of page %d is %u\n", i, rrow);
-#endif
+        start = access->pages[i].phys_addr;
+        next = get_next_row(start, env);
+        end = access->pages[i].phys_addr + access->pages[i].size;
 
-        // & with all other fields because there can be
-        // additional bits after MSB of the dram encoding
-        hwaddr nocol = get_row_mask(access->pages[i].phys_addr, info);
+        while(start < end) {
+            size_used = MIN(next, end) - start;
 
-        debug_printf("Nocol is %lx\n", nocol);
+            debug_printf("start %lx next %lx\n", start, next);
+            prow = g_new0(partial_row, 1);
+            prow->start = start;
+            prow->size = size_used;
+            prow->page_parent = i;
+            prow->host = (void *) ((uint64_t) access->pages[i].host_addr + (start - access->pages[i].phys_addr));
+            QSIMPLEQ_INSERT_TAIL(partial_list, prow, next_partial);
 
-        bool found = false;
-        int j=0;
-        for(; j < n_rows; j++){
-            if(row->rows[j].addr_nocol == nocol){
-                found = true;
-                break;
+            nocol = get_row_mask(start, info);
+
+            row = g_hash_table_lookup(row_table, &nocol);
+            debug_printf("Looking for row %lx in hashmap\n", nocol);
+
+            /* build a linked list of rows, index them using hashmap
+               but just temporarly */
+            if (!row) {
+                debug_printf("Row not found in hashmap, add it\n");
+                row = g_new0(row_data, 1);
+                g_assert(row);
+                row->addr = UINT64_MAX;
+                QSIMPLEQ_INSERT_TAIL(row_list, row, next_row);
+                QSIMPLEQ_INIT(&row->partial_list);
+                g_hash_table_insert(row_table, &nocol, row);
             }
-        }
 
-        if(!found) {
-            j = n_rows;
-            row->rows[j].addr_nocol = nocol;
-            n_rows++;
-        }
+            prow->row_parent = row;
 
-        // if size is not the full page, pim cannot be done
-        // on a smaller-than-row size
-        if((access->pages[i].size != TARGET_PAGE_SIZE)) {
-            debug_printf("Page %d has not full page size (%lu)\n", i, (uint64_t)access->pages[i].size);
-            row->rows[j].not_pim = true;
-        }
+            if(start < row->addr){
+                row->addr = start;
+                row->host = prow->host;
+            }
 
-        row->rows[j].n_pages++;
-        g_assert(row->rows[j].n_pages <= env->pages_in_row);
-        debug_printf("Row %u(%d) has %d pages\n----------------\n", rrow, j,row-> rows[j].n_pages);
-        row->rows_ref[i] = &row->rows[j];
+            row->usage += size_used;
+
+            QSIMPLEQ_INSERT_TAIL(&row->partial_list, prow, next_same_row);
+            row->partial_list_size++;
+
+            debug_printf("Partial row start %lx size %lu page %d row %lx(%lx)\n", prow->start, prow->size, prow->page_parent, nocol, row->addr);
+
+            debug_printf("Row %lx(%lx) usage %lu\n", nocol, row->addr, row->usage);
+
+            start = next;
+            next = get_next_row(start, env);
+        }
     }
+
+    g_hash_table_destroy(row_table);
+    debug_printf("######################\n");
+    return missed_i;
 }
 
-static void del_rowinfo(row_info *row)
+static void del_rowlist(row_data_list *list)
 {
-    free(row->rows);
-    free(row->rows_ref);
+    row_data *row = QSIMPLEQ_FIRST(list);
+    row_data *ro2;
+    while (row != NULL) {
+            ro2 = QSIMPLEQ_NEXT(row, next_row);
+            free(row);
+            row = ro2;
+    }
+    QSIMPLEQ_INIT(list);
 }
+
+static void del_partiallist(partial_row_list *list)
+{
+    partial_row *row = QSIMPLEQ_FIRST(list);
+    partial_row *ro2;
+    while (row != NULL) {
+            ro2 = QSIMPLEQ_NEXT(row, next_partial);
+            free(row);
+            row = ro2;
+    }
+    QSIMPLEQ_INIT(list);
+}
+
+static uint32_t found_index = 0;
+static target_ulong found_size = 0;
+static target_ulong found_addr = 0;
 
 static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
-                           target_ulong addr, target_ulong size,
-                           int mmu_idx, int ra)
+                                int access_type, dram_cpu_info *info,
+                                int mmu_idx, TCGMemOpIdx oi, uintptr_t ra)
 {
-    uint32_t k = 0;
-    target_ulong sz;
+    target_ulong sz, align;
+    CPUState *cpu = env_cpu(env);
+    RISCVPage *page;
+    hwaddr offset;
 
-    while (size > 0) {
+    if(found_size == 0) {
+        found_size = access->size;
+        debug_printf("Size is %lu\n", (uint64_t) found_size);
+        found_addr = access->vaddr;
+    }
+
+    while (found_size > 0) {
         /* size that fits inside a page (taking into account offset) */
-        sz = MIN(size, -(addr | TARGET_PAGE_MASK));
+        sz = MIN(found_size, -(found_addr | TARGET_PAGE_MASK));
 
         /*
          * tlb_vaddr_to_host: tries to see in the TLB the hw address
@@ -248,65 +325,81 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
          * It's a trapless lookup, so it might return NULL if it's not
          * found.
          */
-        // debug_printf("#### Virt Address %lu size %lu\n", (uint64_t) addr, (uint64_t) sz);
-        // access->pages[k].host_addr = probe_write(env, addr, sz, mmu_idx, GETPC());
-        access->pages[k].host_addr = tlb_vaddr_to_host(env, addr, MMU_DATA_STORE, mmu_idx);
-        access->pages[k].v_addr = addr;
-        access->pages[k].size = sz;
+        page = &access->pages[found_index];
+        page->v_addr = found_addr;
+        page->size = sz;
 
-        k++;
-        size -= sz;
-        addr += sz;
-        // debug_printf("New size is %lu\n", (uint64_t) size);
-        g_assert(k <= (access->n_pages * 2));
-    }
+        page->host_addr = tlb_vaddr_to_host(env, found_addr, access_type, mmu_idx);
+        debug_printf("Initial address found %p\n", page->host_addr);
 
-    g_assert(size == 0);
+        // try to access a byte so that the address is loaded in TLB
+        if (!page->host_addr) {
+            debug_printf("Attempting pf\n");
 
-    access->n_pages = k;
+            if(access_type == MMU_DATA_STORE)
+                helper_ret_stb_mmu(env, found_addr, 0, oi, ra);
+            else
+                helper_ret_ldsb_mmu(env, found_addr, oi, ra);
 
-    return k;
-}
+            page->host_addr = tlb_vaddr_to_host(env, found_addr, access_type,
+                                                mmu_idx);
+                                                
+            debug_printf("New address found %p\n", page->host_addr);
+        }
 
-static void find_all_phys_pages(CPURISCVState *env, RISCVAccess *access, dram_cpu_info *info)
-{
-    CPUState *cpu = env_cpu(env);
-    RISCVPage *page;
-    hwaddr offset;
-    target_ulong align;
-
-    for(int i=0; i < access->n_pages; i++) {
-        page = &access->pages[i];
+        // handle physical page now
         align = QEMU_ALIGN_DOWN(page->v_addr, TARGET_PAGE_SIZE);
         page->phys_addr = cpu_get_phys_page_debug(cpu, align);
         offset = page->v_addr - align;
 
         g_assert(page->phys_addr >= info->offset);
+        // remove offset given by DRAM in cpu address space
         page->phys_addr -= info->offset;
 
-        if(page->phys_addr != -1)
+        if(page->phys_addr != (hwaddr) -1)
             page->phys_addr += offset;
 
-        debug_printf("Host %lx\nPhys %lx\nVirt %lx\n",(uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr);
+        debug_printf("Page %d\nHost %lx\nPhys %lx\nVirt %lx\nSize %lu\n-----\n", found_index, (uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr, (uint64_t) page->size);
+
+        found_index++;
+        found_size -= sz;
+        found_addr += sz;
+
+        g_assert(found_index <= (access->n_pages * 2));
     }
+
+    debug_printf("################\n");
+
+    g_assert(found_size == 0);
+    access->n_pages = found_index;
+    found_index = 0;
+    found_size = 0;
+    found_addr = 0;
+
+    return access->n_pages;
 }
 
 #endif
 
-target_ulong helper_bbop(CPURISCVState *env, target_ulong src1,
+void helper_bbop(CPURISCVState *env, target_ulong src1,
                          target_ulong src2, target_ulong dest,
                          target_ulong size)
 {
-    return size;
+
 }
 
 
 #if !defined(CONFIG_USER_ONLY)
+
 static RISCVAccess rcc_src_access, rcc_dest_access;
-static int rcc_i = 0, rcc_mmu_idx;
+static int rcc_mmu_idx;
 static bool rcc_faulted_all_src = false, rcc_faulted_all_dest = false;
 static TCGMemOpIdx rcc_oi;
 static rcc_stats rcc_stat;
+static int rcc_missed_src[100];
+static int n_rcc_missed_src;
+static int rcc_missed_dest[100];
+static int n_rcc_missed_dest;
 
 static hwaddr get_bank_mask(hwaddr phys, dram_cpu_info *info)
 {
@@ -318,19 +411,19 @@ static hwaddr get_subarray_mask(hwaddr phys, dram_cpu_info *info)
     return phys & (info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
 }
 
-static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr start, hwaddr end)
+static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr start, hwaddr dest)
 {
     uint64_t delay = 0;
     dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
 
     hwaddr subs = get_subarray_mask(start, info);
-    hwaddr subd = get_subarray_mask(end, info);
+    hwaddr subd = get_subarray_mask(dest, info);
 
     hwaddr banks = get_bank_mask(start, info);
-    hwaddr bankd = get_bank_mask(end, info);
+    hwaddr bankd = get_bank_mask(dest, info);
 
     hwaddr rows = get_row_mask(start, info);
-    hwaddr rowd = get_row_mask(end, info);
+    hwaddr rowd = get_row_mask(dest, info);
 
     debug_printf("Subarr src is %lx\n", subs);
     debug_printf("Subarr dest is %lx\n", subd);
@@ -368,169 +461,219 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     return delay;
 }
 
-static int check_partial_row(CPURISCVState *env, row_pages *row)
+static uint64_t get_lsb(uint64_t el)
 {
-    return !row || row->not_pim || row->n_pages < env->pages_in_row;
+    return el & ~(el-1);
 }
 
-static void print_debug_partial_row(row_pages *row, int i)
+static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
 {
-    if(!row) {
-        debug_printf("Page %d NULL (no row found), slowing\n", i);
-    } else if (row->not_pim) {
-        debug_printf("Page %d notpim (size is incomplete), slowing\n", i);
-    } else {
-        debug_printf("Page %d (row misses pages), slowing\n", i);
+    char *row;
+
+    g_assert(size <= info->col.size);
+
+    if(src_buff)
+        row = src_buff;
+    else
+        row = g_malloc0(size);
+
+    char *res = row;
+
+    uint64_t end[3] = {0,0,0};
+    uint64_t start[2] = {0,0};
+    uint64_t old = 0;
+    for(int i=0; i < info->col.n_sections; i++){
+        end[i] = ((1 << info->col.bits[i]) -1) << (info->col.offsets[i] + old);
+        old += info->col.offsets[i] + info->col.bits[i];
+        if (i > 0)
+            start[i-1] = get_lsb(end[i]);
+    }
+
+    bool check_once = false;
+
+    for(int j=0; j < (1 << info->col.bits[2]); j++){
+        for(int i=0; i < (1 << info->col.bits[1]); i++){
+
+            if(size == 0) {
+                goto finish;
+            }
+
+            uint64_t off_phys = (phys & end[0]);
+            if(off_phys) {
+                g_assert(check_once == false);
+                check_once = true;
+            }
+            uint64_t sz = MIN(end[0] - off_phys + 1, size);
+            if(src_buff){ // copy from src to row
+                memcpy(host, row, sz);
+                debug_printf("copying from %p till %p sz %lu\n", host, (void *) ((uint64_t) host + sz), sz);
+            } else {
+                memcpy(row, host, sz);
+            }
+            row += sz;
+            size -= sz;
+
+            if(off_phys) {
+                host -= off_phys;
+                phys -= off_phys;
+            }
+
+            host += start[0];
+            phys += start[0];
+        }
+        host += start[1];
+        phys += start[1];
+    }
+finish:
+    g_assert(size == 0);
+    return res;
+}
+
+static char *get_from_row(hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
+{
+    return from_row(NULL, phys, host, info, size);
+}
+
+static void set_to_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
+{
+    from_row(src_buff, phys, host, info, size);
+}
+
+ATTRIBUTE_UNUSED
+static void row_memcpy(hwaddr src_phys, void *src_host, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
+{
+    char *buff = get_from_row(src_phys, src_host, info, size);
+    set_to_row(buff, dest_phys, dest_host, info, size);
+    g_free(buff);
+}
+
+static uint64_t get_increment_row_address(uint64_t increment, dram_cpu_info *info)
+{
+    uint64_t mask, res = 0, old = 0;
+
+    for(int i=0; i < info->col.n_sections; i++){
+        mask = (1 << info->col.bits[i]) -1;
+        res |= (increment & mask) << (info->col.offsets[i] + old);
+        old += info->col.offsets[i] + info->col.bits[i];
+        increment = increment >> info->col.bits[i];
+    }
+
+    return res;
+}
+
+static void perform_rcc_op(partial_row_list *partial_src,
+                               partial_row_list *partial_dest)
+{
+    partial_row *src_part, *dest_part;
+    uint64_t mov_size = 0;
+    uint64_t srcs, dests;
+
+    src_part = QSIMPLEQ_FIRST(partial_src);
+    dest_part = QSIMPLEQ_FIRST(partial_dest);
+
+    while(src_part && dest_part) {
+        srcs = src_part->size;
+        dests = dest_part->size;
+
+        debug_printf("PART Src row %lx size %lu host %p\n", src_part->start, src_part->size, src_part->host);
+        debug_printf("PART Dest row %lx size %lu host %p\n", dest_part->start, dest_part->size, dest_part->host);
+
+        mov_size = MIN(srcs, dests);
+        debug_printf("Move %lu\n", mov_size);
+
+        memmove(dest_part->host, src_part->host, mov_size);
+
+        if(srcs < dests) {
+            src_part = QSIMPLEQ_NEXT(src_part, next_partial);
+            dest_part->size -= mov_size;
+            dest_part->start += mov_size;
+            dest_part->host = (void *) ((uint64_t) dest_part->host + mov_size);
+        } else if (srcs > dests) {
+            dest_part = QSIMPLEQ_NEXT(dest_part, next_partial);
+            src_part->size -= mov_size;
+            src_part->start += mov_size;
+            src_part->host = (void *) ((uint64_t) src_part->host + mov_size);
+        } else {
+            src_part = QSIMPLEQ_NEXT(src_part, next_partial);
+            dest_part = QSIMPLEQ_NEXT(dest_part, next_partial);
+        }
     }
 }
 
-// last % row_size is for the case where addr % row == 0
-static uint64_t calc_init_slow(uint64_t row_size, uint64_t addr)
+static uint64_t perform_rcc_delay(CPURISCVState *env,
+                                  row_data_list *row_src,
+                                  row_data_list *row_dest,
+                                  dram_cpu_info *info)
 {
-    return (row_size - (((uint64_t) addr) % row_size))  % row_size;
-}
+    row_data *src_row, *dest_row;
+    uint64_t mov_size = 0, increment = 0;
+    uint64_t delay_op = 0, delay = 0;
+    uint64_t row_size;
 
-static uint64_t calc_full_fast(uint64_t row_size, target_ulong pgsize, uint64_t init)
-{
-    return (((uint64_t) pgsize) - init) / row_size;
-}
+    row_size = info->col.size;
+    src_row = QSIMPLEQ_FIRST(row_src);
+    dest_row = QSIMPLEQ_FIRST(row_dest);
 
-static uint64_t calc_remaining_slow(uint64_t row_size, target_ulong pgsize, uint64_t init)
-{
-    return (((uint64_t) pgsize) - init) % row_size;
-}
+    while(src_row && dest_row) {
 
-static void rcc_increment_indexes(target_ulong ss, target_ulong sd,
-                                  int *s, int *d, target_ulong *off_ss,
-                                  target_ulong *off_sd, RISCVPage *pages,
-                                  RISCVPage *paged, target_ulong chosen)
-{
-    if(ss == sd) {
-        (*s)++;
-        (*d)++;
-        (*off_sd) = 0;
-        (*off_ss) = 0;
-    } else if(chosen == ss){
-        (*s)++;
-        paged->size -= chosen;
-        (*off_sd) = chosen;
-        (*off_ss) = 0;
-    } else {
-        (*d)++;
-        pages->size -= chosen;
-        (*off_ss) = chosen;
-        (*off_sd) = 0;
-    }
-}
+        debug_printf("Src row %lx size %lu\n", src_row->addr, src_row->usage);
+        debug_printf("Dest row %lx size %lu\n", dest_row->addr,
+                                                dest_row->usage);
 
-static uint64_t rcc_row_gt_page(CPURISCVState *env, int s, int d, hwaddr pphys,
-                            hwaddr pphyd,
-                            row_info *row_src, row_info *row_dest,
-                            target_ulong chosen)
-{
-    // row is bigger than page
-    // same process as rci, but on both src and dest.
-    // then, check that 1) row containing pages src dest
-    // are in same subarray, and 2) check row is full.
-    debug_printf("row > page\n");
+        if(src_row->usage == dest_row->usage &&
+           src_row->usage == row_size) {
 
-    uint64_t delay = 0;
+            /* maybe now we can think about PIM */
+            delay = fpm_psm_delay(env, row_size, src_row->addr, dest_row->addr);
 
-    row_pages *row_s = row_src->rows_ref[s];
-    row_pages *row_d = row_dest->rows_ref[d];
+        } else {
+            /* here we can have src and/or dest not full,
+             or full but with different number of pieces inside */
 
-    // either not row or row not full
-    if(check_partial_row(env, row_s) ||
-        check_partial_row(env, row_d)) {
+            mov_size = MIN(src_row->usage, dest_row->usage);
+            increment = get_increment_row_address(mov_size, info);
 
-        print_debug_partial_row(row_s, s);
-        print_debug_partial_row(row_d, d);
+            debug_printf("Uneven rows, copy only a piece %lu\n", mov_size);
+            delay = CPU_DELAY(mov_size);
+        }
 
-        delay = CPU_DELAY(chosen);
-    } else {
-        delay = fpm_psm_delay(env, chosen, pphys, pphyd);
+        slow_down_by(env, delay);
+        delay_op += delay;
+
+        if(src_row->usage < dest_row->usage){
+            src_row = QSIMPLEQ_NEXT(src_row, next_row);
+
+            debug_printf("Next src, dest increased by %lu %lx\n", mov_size,  increment);
+
+            dest_row->usage -= mov_size;
+            dest_row->addr += increment;
+            dest_row->host = (void *) ((uint64_t) dest_row->host + increment);
+        } else if(src_row->usage > dest_row->usage) {
+            dest_row = QSIMPLEQ_NEXT(dest_row, next_row);
+
+            debug_printf("Next dest, src increased by %lu %lx\n", mov_size,  increment);
+
+            src_row->usage -= mov_size;
+            src_row->addr += increment;
+            src_row->host = (void *) ((uint64_t) src_row->host + increment);
+        } else {
+            src_row = QSIMPLEQ_NEXT(src_row, next_row);
+            dest_row = QSIMPLEQ_NEXT(dest_row, next_row);
+
+            debug_printf("Next src and dest\n");
+        }
     }
 
-    // memmove(hostd, hosts, chosen);
-    return delay;
-}
-
-static uint64_t rcc_row_lt_page(CPURISCVState *env, hwaddr pphys,
-                            hwaddr pphyd,
-                            target_ulong chosen, uint64_t row_size)
-{
-    // remove initial and end bytes that are slow
-    // but only if in the same subarray
-    debug_printf("row < page\n");
-    uint64_t delay = 0;
-
-    // initial offset. If different for both
-    // src and dest, there is no way we can do things faster
-    uint64_t init_slow_s = calc_init_slow(row_size, pphys);
-    uint64_t init_slow_d = calc_init_slow(row_size, pphyd);
-
-    // delete initial offset from size, but check now
-    // that each full row is in the same subarray
-    // middle is fast, done by PIM
-    uint64_t full_rows = calc_full_fast(row_size, chosen, init_slow_s);
-
-    // final offset
-    // end is slow, done by CPU
-    uint64_t remaining_slow =calc_remaining_slow(row_size, chosen, init_slow_s);
-
-    if(init_slow_s != init_slow_d){
-        // slow everything
-        debug_printf("All are slow, init offset don't match\n");
-        return CPU_DELAY(chosen);
-
-    } else if(init_slow_s != 0) {
-        // init is slow, done by CPU
-        debug_printf("Initial %ld/%ld are slow\n", init_slow_s, (uint64_t) chosen);
-        delay += CPU_DELAY(init_slow_s);
-    }
-
-    debug_printf("Middle %ld/%ld are fast\n", full_rows *row_size, (uint64_t) chosen);
-
-    pphys += init_slow_s;
-    pphyd += init_slow_d;
-
-    for(int i=0; i < full_rows; i++){
-        delay += fpm_psm_delay(env, chosen, pphys, pphyd);
-        pphys += row_size;
-        pphyd += row_size;
-    }
-
-    // final offset
-    debug_printf("Final %ld/%ld are slow\n", remaining_slow, (uint64_t) chosen);
-    delay += CPU_DELAY(remaining_slow);
-
-    return delay;
-}
-
-static uint64_t rcc_row_eq_page(CPURISCVState *env, hwaddr pphys,
-                            hwaddr pphyd, target_ulong chosen, uint64_t row_size)
-{
-    debug_printf("row == page\n");
-
-    uint64_t delay = 0;
-
-    // not row-aligned
-    if(chosen != row_size){
-        debug_printf("Chosen %lu bytes, less than %d, slowdown\n", (uint64_t) chosen, TARGET_PAGE_SIZE);
-        delay = CPU_DELAY(chosen);
-    } else {
-        delay = fpm_psm_delay(env, chosen, pphys, pphyd);
-    }
-
-    return delay;
+    return delay_op;
 }
 
 #endif
 
-target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
+void helper_rcc(CPURISCVState *env, target_ulong src,
                         target_ulong dest, target_ulong size)
 {
-    target_ulong old_size = size;
+    if(size == 0)
+        return;
 
 #if defined(CONFIG_USER_ONLY)
     void *src_addr;
@@ -541,278 +684,160 @@ target_ulong helper_rcc(CPURISCVState *env, target_ulong src,
     memcpy(dest_addr, src_addr, size);
 #else
 
+    dram_cpu_info *info;
+    row_data_list row_src, row_dest;
+    partial_row_list partial_src, partial_dest;
+    uint64_t delay_op = 0;
+
     /* Only init once */
     if(rcc_src_access.pages == NULL) {
         rcc_mmu_idx = cpu_mmu_index(env, false);
         rcc_oi = make_memop_idx(MO_UB, rcc_mmu_idx);
 
-
-        init_riscv_access(&rcc_src_access, size);
-        init_riscv_access(&rcc_dest_access, size);
-
-        find_all_pages(env, &rcc_src_access, src, size, rcc_mmu_idx, GETPC());
-        find_all_pages(env, &rcc_dest_access, dest, size, rcc_mmu_idx, GETPC());
+        init_riscv_access(&rcc_src_access, src, size);
+        init_riscv_access(&rcc_dest_access, dest, size);
     }
 
+    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+
+    /* Page fault if needed, but find all pages. Code until here
+     * can re-executed becauses find_all_pages triggers a pf. */
+    
     /* Pre-fault all src pages once */
     if(rcc_faulted_all_src == false) {
         rcc_stat.general.avg_pf.sum++;
-        for(; rcc_i < rcc_src_access.n_pages; rcc_i++) {
-            if(unlikely(rcc_src_access.pages[rcc_i].host_addr == NULL)) {
-                /*
-                 * Do a single access and test if we can then get access to the
-                 * page. This is especially relevant to speed up TLB_NOTDIRTY.
-                 */
-                helper_ret_ldsb_mmu(env, rcc_src_access.pages[rcc_i].v_addr, rcc_oi, GETPC());
-
-                rcc_src_access.pages[rcc_i].host_addr = tlb_vaddr_to_host(env,
-                                                rcc_src_access.pages[rcc_i].v_addr,
-                                                MMU_DATA_LOAD, rcc_mmu_idx);
-            }
-        }
-        rcc_i = 0;
+        find_all_pages(env, &rcc_src_access, MMU_DATA_LOAD, info, rcc_mmu_idx, rcc_oi, GETPC());
         rcc_faulted_all_src = true;
     }
 
     /* Pre-fault all dest pages once */
-    if( rcc_faulted_all_dest == false) {
+    if(rcc_faulted_all_dest == false) {
         rcc_stat.general.avg_pf.sum++;
-         for(; rcc_i < rcc_dest_access.n_pages; rcc_i++) {
-            if(unlikely(rcc_dest_access.pages[rcc_i].host_addr == NULL)) {
-                /*
-                 * Do a single access and test if we can then get access to the
-                 * page. This is especially relevant to speed up TLB_NOTDIRTY.
-                 */
-                helper_ret_stb_mmu(env, rcc_dest_access.pages[rcc_i].v_addr, 0, rcc_oi, GETPC());
-
-                rcc_dest_access.pages[rcc_i].host_addr = tlb_vaddr_to_host(env,
-                                                rcc_dest_access.pages[rcc_i].v_addr,
-                                                MMU_DATA_STORE, rcc_mmu_idx);
-            }
-        }
-        rcc_i = 0;
+        find_all_pages(env, &rcc_dest_access, MMU_DATA_STORE, info, rcc_mmu_idx, rcc_oi, GETPC());
         rcc_faulted_all_dest = true;
     }
 
-    dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
-
-    find_all_phys_pages(env, &rcc_src_access, info);
-    find_all_phys_pages(env, &rcc_dest_access, info);
-
-    int s = 0, d = 0;
-    target_ulong ss, sd, chosen, off_ss = 0, off_sd = 0;
-    RISCVPage *pages, *paged;
-
-    uint64_t row_size = info->col.size;
-    row_info row_src, row_dest;
-
-    uint64_t delay = 0, delay_op = 0;
-    // debug_printf("Row size is %ld, page size is %d\n", row_size, TARGET_PAGE_SIZE);
-
-    if (row_size > TARGET_PAGE_SIZE) {
-        init_rowinfo(env, info, &row_src, &rcc_src_access);
-        debug_printf("######################\n");
-        init_rowinfo(env, info, &row_dest, &rcc_dest_access);
-        debug_printf("######################\n");
-    }
+    n_rcc_missed_src = init_rowlist(env, info, &rcc_src_access, &row_src, &partial_src, rcc_missed_src);
+    n_rcc_missed_dest = init_rowlist(env, info, &rcc_dest_access, &row_dest, &partial_dest, rcc_missed_dest);
 
     rcc_stat.general.tot_bytes += size;
 
-    while (size > 0) {
+    /* Core operation, perform the actual copy */
+    perform_rcc_op(&partial_src, &partial_dest);
+    delay_op = perform_rcc_delay(env, &row_src, &row_dest, info);
 
-        pages = &(rcc_src_access.pages[s]);
-        paged = &(rcc_dest_access.pages[d]);
-        ss = pages->size;
-        sd = paged->size;
-        hwaddr pphys = pages->phys_addr + off_ss;
-        hwaddr pphyd = paged->phys_addr + off_sd;
-        void * hosts = pages->host_addr + off_ss;
-        void * hostd = paged->host_addr + off_sd;
+    /* missed ones, should be done manually */
+    g_assert(n_rcc_missed_src == 0 && n_rcc_missed_dest == 0);
 
-        chosen = MIN(ss, sd);
-
-        debug_printf("src: page %d (%lx) size %lu offset %lu chosen %lu\n", s, pages->phys_addr,(uint64_t) ss, (uint64_t) off_ss, (uint64_t) chosen);
-        debug_printf("dest: page %d (%lx) size %lu offset %lu chosen %lu\n", d, paged->phys_addr,(uint64_t) sd, (uint64_t) off_sd, (uint64_t) chosen);
-
-        // a row can contain more NON contiguous pages of the same
-        // array. If they all are there, and are in same subarray,
-        // copy them
-        if(likely(pages->host_addr) &&
-           likely(paged->host_addr)) {
-
-                debug_printf("Row size %ld, page size %d\n", row_size, TARGET_PAGE_SIZE);
-
-                if(row_size > TARGET_PAGE_SIZE){
-                    delay = rcc_row_gt_page(env, s, d, pphys, pphyd, &row_src, &row_dest, chosen);
-                } else if (row_size < TARGET_PAGE_SIZE) {
-                   delay = rcc_row_lt_page(env, pphys, pphyd, chosen, row_size);
-                } else {
-                   delay = rcc_row_eq_page(env, pphys, pphyd, chosen, row_size);
-                }
-
-                slow_down_by(env, delay);
-                memmove(hostd, hosts, chosen);
-
-        } else { /* do it manually if there is no page */
-
-            delay = CPU_DELAY(chosen) * 2;
-            rcc_stat.general.other += chosen;
-            slow_down_by(env, delay);
-
-            for(int i=0; i < chosen; i++){
-                uint8_t byte;
-
-                byte = helper_ret_ldsb_mmu(env, pages->v_addr + off_ss + i, rcc_oi, GETPC());
-
-                helper_ret_stb_mmu(env, paged->v_addr + off_sd + i, byte, rcc_oi, GETPC());
-            }
-
-        }
-
-        delay_op += delay;
-
-        rcc_increment_indexes(ss, sd, &s, &d, &off_ss, &off_sd, pages, paged, chosen);
-
-        size -= chosen;
-
-    }
-
+    /* Final stats bookeeping and cleanup */
     rcc_stat.general.avg_delay.n++;
     rcc_stat.general.avg_delay.sum += delay_op;
-
-    if (row_size > TARGET_PAGE_SIZE) {
-        del_rowinfo(&row_src);
-        del_rowinfo(&row_dest);
-    }
-
-    debug_printf("#######################\n");
-
-    del_riscv_access(&rcc_src_access);
-    del_riscv_access(&rcc_dest_access);
-
-    g_assert(rcc_faulted_all_dest && rcc_faulted_all_src);
-    rcc_faulted_all_dest = false;
-    rcc_faulted_all_src = false;
     rcc_stat.general.avg_pf.sum -= 2;
     rcc_stat.general.avg_pf.n++;
 
+    del_rowlist(&row_src);
+    del_rowlist(&row_dest);
+    del_partiallist(&partial_src);
+    del_partiallist(&partial_dest);
+    del_riscv_access(&rcc_src_access);
+    del_riscv_access(&rcc_dest_access);
+
+    rcc_faulted_all_dest = false;
+    rcc_faulted_all_src = false;
+    debug_printf("#######################\n");
+
 #endif
-    return old_size;
 }
-
-
-
 
 #if !defined(CONFIG_USER_ONLY)
 
 static RISCVAccess rci_access;
-static int rci_mmu_idx, rci_i = 0;
+static int rci_mmu_idx;
 static bool rci_faulted_all = false;
 static TCGMemOpIdx rci_oi;
 static rci_stats rci_stat;
+static char *zero_row;
+static int rci_missed[100];
+static int n_rci_missed = 0;
 
-static uint64_t rci_row_eq_page(CPURISCVState *env, int i, uint64_t row_size, dram_cpu_info *info)
+static void init_zero_row(uint64_t row_size)
 {
+    if(!zero_row){
+        zero_row = g_malloc0(row_size);
+    #if MEMSET_BYTE
+        memset(zero_row, MEMSET_BYTE, row_size);
+     #endif
+        debug_printf("Byte in row is %u\n", zero_row[0]);
+    }
+}
 
-    debug_printf("Row size == TARGET logic\n");
-    debug_printf("Access in page %d size %ld\n", i, (uint64_t) rci_access.pages[i].size);
-    uint64_t delay = 0;
+static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
+                            dram_cpu_info *info)
+{
+    row_data *tmp;
+    uint64_t row_size;
+    uint64_t delay = 0, delay_op = 0;
 
-    // less than a row, do it in CPU
-    if( rci_access.pages[i].size != row_size){
-        debug_printf("Access is not aligned to row/target size, slow\n");
-        delay += CPU_DELAY(rci_access.pages[i].size);
-    }else {
-        hwaddr start_row = get_row_mask(rci_access.pages[i].phys_addr, info);
-        hwaddr end_row = get_row_mask(rci_access.pages[i].phys_addr + row_size -1, info);
-        if (start_row == end_row) {
-            debug_printf("First and last byte are in same row, fast\n");
+    row_size = info->col.size;
+
+    QSIMPLEQ_FOREACH(tmp, rows, next_row) {
+
+        debug_printf("Row %lx %p %lu\n", tmp->addr, tmp->host, tmp->usage);
+
+        if(tmp->usage == row_size){
+            debug_printf("FAST PIM\n");
+            delay = PIM_DELAY(row_size);
             rci_stat.in_pim += row_size;
-            delay += PIM_DELAY(rci_access.pages[i].size);
+
+            set_to_row(zero_row, tmp->addr, tmp->host, info, row_size);
         } else {
-            debug_printf("Size is correct, but mapping is not in a full row, slow\n");
-            delay += CPU_DELAY(rci_access.pages[i].size);
+            debug_printf("SLOW CPU\n");
+            delay = CPU_DELAY(tmp->usage);
+
+            partial_row *ttmp;
+            /* Do partial row at time because a row can have holes in it
+            * because pages might not be contiguous, so maybe some pieces
+            * are missing */
+            QSIMPLEQ_FOREACH(ttmp, &tmp->partial_list, next_same_row) {
+                g_assert(ttmp->row_parent == tmp);
+                // debug_printf("copying from %p till %p sz %lu\n", ttmp->host, (void *) ((uint64_t) ttmp->host + ttmp->size), ttmp->size);
+                memset(ttmp->host, MEMSET_BYTE, ttmp->size);
+                rci_access.pages[ttmp->page_parent].size -= ttmp->size;
+            }
         }
 
+        slow_down_by(env, delay);
+        delay_op += delay;
     }
 
-    debug_printf("Memset page %d\n", i);
-    return delay;
+    return delay_op;
 }
 
-static uint64_t rci_row_lt_page(CPURISCVState *env, int i, uint64_t row_size)
+static uint64_t perform_rci_missed(CPURISCVState *env)
 {
-    debug_printf("Row size < TARGET logic\n");
+    uint64_t delay_op;
 
-    uint64_t delay = 0;
+    /* rci_missed pages (the ones that have to be set manually) */
+    for (int i=0; i < n_rci_missed; i++) {
+        rci_stat.other += rci_access.pages[rci_missed[i]].size;
+        slow_down_by(env, rci_access.pages[rci_missed[i]].size);
+        delay_op += rci_access.pages[rci_missed[i]].size;
 
-    // initial offset
-    uint64_t init_slow = calc_init_slow(row_size, rci_access.pages->phys_addr);
-
-    // delete initial offset from size
-    uint64_t full_rows = calc_full_fast(row_size, rci_access.pages[i].size, init_slow);
-
-    // final offset
-    uint64_t remaining_slow =calc_remaining_slow(row_size, rci_access.pages[i].size, init_slow);
-
-    // init is slow, done by CPU
-    debug_printf("Initial %ld/%d are slow\n", init_slow, TARGET_PAGE_SIZE);
-    delay += CPU_DELAY(init_slow);
-
-    // middle is fast, done by PIM
-    full_rows *= row_size;
-    debug_printf("Middle %ld/%d are fast\n", full_rows, TARGET_PAGE_SIZE);
-    rci_stat.in_pim += full_rows;
-    delay += PIM_DELAY(init_slow);
-
-    // end is slow, done by CPU
-    debug_printf("Final %ld/%d are slow\n", remaining_slow, TARGET_PAGE_SIZE);
-    delay += CPU_DELAY(remaining_slow);
-
-    return delay;
-}
-
-
-static uint64_t rci_row_gt_page(CPURISCVState *env, int i, row_info *row)
-{
-    debug_printf("Row size > TARGET logic\n");
-
-    uint64_t delay = 0;
-
-#if DRAM_DEBUG
-    uint32_t rrow;
-    dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
-    dram_el_to_dram_info(&info->row, &rrow, rci_access.pages[i].phys_addr);
-    debug_printf("Row of page %d is %u\n", i, rrow);
-#endif
-
-    row_pages *page = row->rows_ref[i];
-
-    // it's part of a full row, memset it one page at time
-    // physical address (thus host virtual) could NOT be
-    // contiguous for pages
-    // in the same row, due to row interleaving.
-    // so do it one at the time anyways
-    if(check_partial_row(env, page)) {
-        print_debug_partial_row(page, i);
-        delay += CPU_DELAY(rci_access.pages[i].size);
-    } else {
-        rci_stat.in_pim += rci_access.pages[i].size;
-        delay += PIM_DELAY(rci_access.pages[i].size);
+        /* No luck, do it manually */
+        for (int j = 0; j < rci_access.pages[rci_missed[i]].size; j++) {
+            helper_ret_stb_mmu(env, rci_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, rci_oi, GETPC());
+        }
     }
 
-    return delay;
+    return delay_op;
 }
-
 #endif
 
-target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
+void helper_rci(CPURISCVState *env, target_ulong dest,
                         target_ulong size)
 {
-
-    target_ulong old_size = size;
-
-    g_assert(size != 0);
+    if(size == 0)
+        return;
 
 #if defined(CONFIG_USER_ONLY)
     void *dest_addr;
@@ -826,106 +851,59 @@ target_ulong helper_rci(CPURISCVState *env, target_ulong dest,
      * System: MMU, make sure to get the correct pages (host addresses)
      * via the TLB, and load missing pages if needed.
      */
+    dram_cpu_info *info;
+    row_data_list rows;
+    partial_row_list partial_rows;
+    uint64_t row_size;
+    uint64_t delay_op;
 
     /* Only init once */
     if(rci_access.pages == NULL) {
         rci_mmu_idx = cpu_mmu_index(env, false);
         rci_oi = make_memop_idx(MO_UB, rci_mmu_idx);
-
-        init_riscv_access(&rci_access, size);
-
-        find_all_pages(env, &rci_access, dest, size, rci_mmu_idx, GETPC());
+        init_riscv_access(&rci_access, dest, size);
     }
 
-    /* Pre-fault all pages once */
-    if(rci_faulted_all == false) {
-        rci_stat.avg_pf.sum++;
+    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+    row_size = info->col.size;
 
-        for(; rci_i < rci_access.n_pages; rci_i++) {
-            if(unlikely(rci_access.pages[rci_i].host_addr == NULL)) {
-                /*
-                 * Do a single access and test if we can then get access to the
-                 * page. This is especially relevant to speed up TLB_NOTDIRTY.
-                 */
-                g_assert(rci_access.pages[rci_i].size > 0);
+    /* Page fault if needed, but find all pages. Code until here
+     * can re-executed becauses find_all_pages triggers a pf. */
+    rci_stat.avg_pf.sum++;
+    find_all_pages(env, &rci_access, MMU_DATA_STORE, info, rci_mmu_idx, rci_oi, GETPC());
 
-                helper_ret_stb_mmu(env, rci_access.pages[rci_i].v_addr, MEMSET_BYTE, rci_oi, GETPC());
+    /* pre-init the zero rowbuffer*/
+    init_zero_row(row_size);
 
-                rci_access.pages[rci_i].host_addr = tlb_vaddr_to_host(env, rci_access.pages[rci_i].v_addr, MMU_DATA_STORE, rci_mmu_idx);
-            }
-        }
-        rci_i = 0;
-        rci_faulted_all = true;
-    }
-
-    dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
-
-    find_all_phys_pages(env, &rci_access, info);
-
-    uint64_t row_size = info->col.size;
-    debug_printf("Row size is %ld, page size is %d\n", row_size, TARGET_PAGE_SIZE);
-
+    /* Stats bookeeping */
     rci_stat.tot_bytes += size;
 
-    row_info row;
+    /* parse pages in row and partial rows */
+    n_rci_missed = init_rowlist(env, info, &rci_access, &rows, &partial_rows, rci_missed);
 
-    if (row_size > TARGET_PAGE_SIZE) {
-        debug_printf("Row size > TARGET logic\n");
-        init_rowinfo(env,  info, &row, &rci_access);
-    }
+    /* Core operation, perform the actual memset */
+    delay_op = perform_rci(env, &rows, info);
+    delay_op += perform_rci_missed(env);
 
-    uint64_t delay = 0, delay_op = 0;
-
-    for (int i=0; i < rci_access.n_pages; i++) {
-
-        /* There is a page in TLB, just memset it */
-        if (likely(rci_access.pages[i].host_addr)) {
-
-            // we need more contiguous pages than this to get
-            // a full row.
-            if(row_size > TARGET_PAGE_SIZE){
-                delay = rci_row_gt_page(env, i, &row);
-            }else if(row_size < TARGET_PAGE_SIZE) {
-                delay = rci_row_lt_page(env, i, row_size);
-            } else { /* row is equal to a page size: */
-                delay = rci_row_eq_page(env, i, row_size, info);
-            }
-
-            slow_down_by(env, delay);
-
-            memset(rci_access.pages[i].host_addr, MEMSET_BYTE, rci_access.pages[i].size);
-
-        } else {
-            rci_stat.other += rci_access.pages[i].size;
-            delay = CPU_DELAY(rci_access.pages[i].size);
-            slow_down_by(env, delay);
-
-            /* No luck, do it manually. Skip first byte bc already set */
-            for (int j = 1; j < rci_access.pages[i].size; j++) {
-                helper_ret_stb_mmu(env, rci_access.pages[i].v_addr + j, MEMSET_BYTE, rci_oi, GETPC());
-            }
-        }
-
-        delay_op += delay;
-
-    }
-
+    /* Final stats, and cleanup */
     rci_stat.avg_delay.n++;
     rci_stat.avg_delay.sum += delay_op;
-
-    if(row_size > TARGET_PAGE_SIZE){
-        del_rowinfo(&row);
-    }
-
-    debug_printf("#######################\n");
-
-    del_riscv_access(&rci_access);
-    g_assert(rci_faulted_all);
-    rci_faulted_all = false;
     rci_stat.avg_pf.sum--;
     rci_stat.avg_pf.n++;
+
+    del_rowlist(&rows);
+    del_partiallist(&partial_rows);
+    del_riscv_access(&rci_access);
+    rci_faulted_all = false;
+
+    debug_printf("#######################\n");
 #endif
-    return old_size;
+}
+
+void helper_rcik(CPURISCVState *env, target_ulong dest,
+                        target_ulong size)
+{
+
 }
 
 #if !defined(CONFIG_USER_ONLY)
@@ -953,8 +931,8 @@ static void helper_rci_stat(CPURISCVState *env)
         rci_stat.other,
         calc_perc(rci_stat.tot_bytes, rci_stat.other),
 
-        rci_stat.avg_pf.sum / rci_stat.avg_pf.n,
-        (uint32_t) rci_stat.avg_delay.sum / rci_stat.avg_delay.n);
+        rci_stat.avg_pf.n == 0 ? 0 : (rci_stat.avg_pf.sum / rci_stat.avg_pf.n),
+        rci_stat.avg_delay.n == 0 ? 0 : ((uint32_t) rci_stat.avg_delay.sum / rci_stat.avg_delay.n));
 
     memset(&rci_stat, 0, sizeof(rci_stat));
 #endif
@@ -973,18 +951,17 @@ static void helper_rcc_stat(CPURISCVState *env)
         calc_perc(rcc_stat.general.in_pim, rcc_stat.in_fpm),
 
         rcc_stat.in_psm,
-        100ul - calc_perc(rcc_stat.general.in_pim, rcc_stat.in_fpm),
+        rcc_stat.in_psm == 0 ? 0 : 100ul - calc_perc(rcc_stat.general.in_pim, rcc_stat.in_fpm),
 
         rcc_stat.general.tot_bytes - rcc_stat.general.in_pim - rcc_stat.general.other,
-        100 - calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.in_pim) -
-        calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.other),
+        100 - calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.in_pim) - calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.other),
 
         rcc_stat.general.other,
         calc_perc(rcc_stat.general.tot_bytes, rcc_stat.general.other),
 
-        rcc_stat.general.avg_pf.sum / rcc_stat.general.avg_pf.n,
+        rcc_stat.general.avg_pf.n == 0 ? 0 : (rcc_stat.general.avg_pf.sum / rcc_stat.general.avg_pf.n),
 
-        (uint32_t) rcc_stat.general.avg_delay.sum / rcc_stat.general.avg_delay.n);
+        rcc_stat.general.avg_delay.n == 0 ? 0 : ((uint32_t) rcc_stat.general.avg_delay.sum / rcc_stat.general.avg_delay.n));
 
     memset(&rcc_stat, 0, sizeof(rcc_stat));
 #endif

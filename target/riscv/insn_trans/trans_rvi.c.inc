@@ -180,9 +180,8 @@ static bool trans_bbop(DisasContext *ctx, arg_bbop *a)
     gen_get_gpr(size, a->rs3);
     gen_get_gpr(dest, a->rd);
 
-    gen_helper_bbop(dest, cpu_env, src1, src2, dest, size);
+    gen_helper_bbop(cpu_env, src1, src2, dest, size);
 
-    gen_set_gpr(a->rd, dest);
     tcg_temp_free(src1);
     tcg_temp_free(src2);
     tcg_temp_free(size);
@@ -202,10 +201,7 @@ static bool trans_rcc(DisasContext *ctx, arg_rcc *a)
     gen_get_gpr(dest, a->rs2);
     gen_get_gpr(size, a->rd);
 
-    gen_helper_rcc(size, cpu_env, src, dest, size);
-
-    gen_set_gpr(a->rd, size);
-
+    gen_helper_rcc(cpu_env, src, dest, size);
 
     tcg_temp_free(src);
     tcg_temp_free(dest);
@@ -214,7 +210,7 @@ static bool trans_rcc(DisasContext *ctx, arg_rcc *a)
     return true;
 }
 
-static bool trans_rci(DisasContext *ctx, arg_rci *a)
+static bool gen_rci(DisasContext *ctx, arg_rci *a)
 {
     // printf("rci dest:%d size:%d ret:%d\n", a->rs1, a->rs2, a->rd);
 
@@ -224,13 +220,21 @@ static bool trans_rci(DisasContext *ctx, arg_rci *a)
     gen_get_gpr(dest, a->rs1);
     gen_get_gpr(size, a->rs2);
 
-    gen_helper_rci(size, cpu_env, dest, size);
-
-    gen_set_gpr(a->rd, size);
+    gen_helper_rci(cpu_env, dest, size);
 
     tcg_temp_free(dest);
     tcg_temp_free(size);
     return true;
+}
+
+static bool trans_rci(DisasContext *ctx, arg_rci *a)
+{
+    return gen_rci(ctx, a);
+}
+
+static bool trans_rcik(DisasContext *ctx, arg_rcik *a)
+{
+    return gen_rci(ctx, a);
 }
 
 static bool trans_stat(DisasContext *ctx, arg_stat *a)

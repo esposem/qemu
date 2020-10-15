@@ -499,6 +499,11 @@ static void dram_release_timer(void *arg)
     qemu_mutex_unlock(&env->op_mutex);
 }
 
+static uint64_t get_lsb(uint64_t el)
+{
+    return el & ~(el-1);
+}
+
 static void riscv_cpu_init(Object *obj)
 {
     RISCVCPU *cpu = RISCV_CPU(obj);
@@ -512,7 +517,20 @@ static void riscv_cpu_init(Object *obj)
 
     env->op_timer = timer_new_us(QEMU_CLOCK_VIRTUAL, dram_release_timer, env);
 
-    env->pages_in_row = cpu->dram_info.col.size / TARGET_PAGE_SIZE;
+    // env->pages_in_row = cpu->dram_info.col.size / TARGET_PAGE_SIZE;
+    env->lsb_nocol = UINT64_MAX;
+    uint64_t lsb;
+
+    if((lsb = get_lsb(cpu->dram_info.channel.mask)) < env->lsb_nocol)
+        env->lsb_nocol = lsb;
+    if((lsb = get_lsb(cpu->dram_info.rank.mask)) < env->lsb_nocol)
+        env->lsb_nocol = lsb;
+    if((lsb = get_lsb(cpu->dram_info.bank.mask)) < env->lsb_nocol)
+        env->lsb_nocol = lsb;
+    if((lsb = get_lsb(cpu->dram_info.row.mask)) < env->lsb_nocol)
+        env->lsb_nocol = lsb;
+
+    printf("LSB IS %lx\n", env->lsb_nocol);
 }
 
 static void riscv_cpu_destroy(Object *obj)
