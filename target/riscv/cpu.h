@@ -233,7 +233,6 @@ struct CPURISCVState {
 
     QEMUTimer *op_timer;
     QemuMutex op_mutex;
-    QemuCond op_cond;
     // int pages_in_row;
     uint64_t lsb_nocol;
 

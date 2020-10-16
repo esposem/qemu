@@ -19,6 +19,10 @@ typedef struct dram_cpu_info {
     dram_element_info col;
     uint64_t offset; // shift offset. If > 0, >>. If < 0, <<.
     uint64_t size;
+
+    // just to avoid doing it every time
+    uint64_t part_row_start[2];
+    uint64_t part_row_end;
 } dram_cpu_info;
 
 

@@ -495,13 +495,32 @@ static void dram_release_timer(void *arg)
 {
     CPURISCVState *env = (CPURISCVState *) arg;
 
-    qemu_cond_signal(&env->op_cond);
     qemu_mutex_unlock(&env->op_mutex);
 }
 
 static uint64_t get_lsb(uint64_t el)
 {
     return el & ~(el-1);
+}
+
+static void get_partial_rows_bits(dram_cpu_info *info)
+{
+    uint64_t end = 0, old = 0;
+
+    for(int i=0; i < info->col.n_sections; i++){
+        	end = ((1 << info->col.bits[i]) -1) <<
+			(info->col.offsets[i] + old);
+
+        	old += info->col.offsets[i] + info->col.bits[i];
+
+		if (i > 0)
+			info->part_row_start[i-1] = get_lsb(end);
+		else
+			info->part_row_end = end;
+
+		if(end < info->part_row_end)
+			info->part_row_end = end;
+	}
 }
 
 static void riscv_cpu_init(Object *obj)
@@ -511,9 +530,9 @@ static void riscv_cpu_init(Object *obj)
 
     cpu_set_cpustate_pointers(cpu);
     read_dram_info_file(&cpu->dram_info);
+    get_partial_rows_bits(&cpu->dram_info);
 
     qemu_mutex_init(&env->op_mutex);
-    qemu_cond_init(&env->op_cond);
 
     env->op_timer = timer_new_us(QEMU_CLOCK_VIRTUAL, dram_release_timer, env);
 
@@ -538,9 +557,7 @@ static void riscv_cpu_destroy(Object *obj)
     RISCVCPU *cpu = RISCV_CPU(obj);
     CPURISCVState *env = &cpu->env;
 
-    qemu_cond_signal(&env->op_cond);
     qemu_mutex_destroy(&env->op_mutex);
-    qemu_cond_destroy(&env->op_cond);
     timer_del(env->op_timer);
     timer_free(env->op_timer);
 }

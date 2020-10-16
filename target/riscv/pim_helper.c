@@ -151,8 +151,6 @@ static inline void slow_down_by(CPURISCVState *env, size_t delay)
 
     qemu_mutex_lock(&env->op_mutex);
     timer_mod(env->op_timer, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + delay);
-    qemu_cond_wait(&env->op_cond, &env->op_mutex);
-    qemu_mutex_unlock(&env->op_mutex);
 #endif
 }
 
@@ -296,6 +294,54 @@ static void del_partiallist(partial_row_list *list)
     QSIMPLEQ_INIT(list);
 }
 
+static hwaddr virt_to_phys(CPURISCVState *env, dram_cpu_info *info,
+                           target_ulong addr)
+{
+    CPUState *cpu = env_cpu(env);
+    target_ulong align;
+    hwaddr offset, ret;
+
+    align = QEMU_ALIGN_DOWN(addr, TARGET_PAGE_SIZE);
+    ret = cpu_get_phys_page_debug(cpu, align);
+    offset = addr - align;
+
+    g_assert(ret >= info->offset);
+    // remove offset given by DRAM in cpu address space
+    ret -= info->offset;
+
+    if(ret != (hwaddr) -1)
+        ret += offset;
+    
+    return ret;
+}
+
+static void *virt_to_host(CPURISCVState *env, target_ulong addr,
+                          int access_type, dram_cpu_info *info,
+                          int mmu_idx, TCGMemOpIdx oi, uintptr_t ra)
+{
+    void *ret;
+
+    ret = tlb_vaddr_to_host(env, addr, access_type, mmu_idx);
+    debug_printf("Initial address found %p\n", ret);
+
+    if(ret)
+        return ret;
+
+    // try to access a byte so that the address is loaded in TLB
+    debug_printf("Attempting pf\n");
+
+    if(access_type == MMU_DATA_STORE)
+        helper_ret_stb_mmu(env, addr, 0, oi, ra);
+    else
+        helper_ret_ldsb_mmu(env, addr, oi, ra);
+
+    ret = tlb_vaddr_to_host(env, addr, access_type, mmu_idx);
+
+    debug_printf("New address found %p\n", ret);
+
+    return ret;
+}
+
 static uint32_t found_index = 0;
 static target_ulong found_size = 0;
 static target_ulong found_addr = 0;
@@ -304,10 +350,8 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
                                 int access_type, dram_cpu_info *info,
                                 int mmu_idx, TCGMemOpIdx oi, uintptr_t ra)
 {
-    target_ulong sz, align;
-    CPUState *cpu = env_cpu(env);
+    target_ulong sz;
     RISCVPage *page;
-    hwaddr offset;
 
     if(found_size == 0) {
         found_size = access->size;
@@ -329,35 +373,11 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
         page->v_addr = found_addr;
         page->size = sz;
 
-        page->host_addr = tlb_vaddr_to_host(env, found_addr, access_type, mmu_idx);
-        debug_printf("Initial address found %p\n", page->host_addr);
-
-        // try to access a byte so that the address is loaded in TLB
-        if (!page->host_addr) {
-            debug_printf("Attempting pf\n");
-
-            if(access_type == MMU_DATA_STORE)
-                helper_ret_stb_mmu(env, found_addr, 0, oi, ra);
-            else
-                helper_ret_ldsb_mmu(env, found_addr, oi, ra);
-
-            page->host_addr = tlb_vaddr_to_host(env, found_addr, access_type,
-                                                mmu_idx);
-                                                
-            debug_printf("New address found %p\n", page->host_addr);
-        }
+        page->host_addr = virt_to_host(env, found_addr, access_type, info,
+                                       mmu_idx, oi, ra);
 
         // handle physical page now
-        align = QEMU_ALIGN_DOWN(page->v_addr, TARGET_PAGE_SIZE);
-        page->phys_addr = cpu_get_phys_page_debug(cpu, align);
-        offset = page->v_addr - align;
-
-        g_assert(page->phys_addr >= info->offset);
-        // remove offset given by DRAM in cpu address space
-        page->phys_addr -= info->offset;
-
-        if(page->phys_addr != (hwaddr) -1)
-            page->phys_addr += offset;
+        page->phys_addr = virt_to_phys(env, info, found_addr);
 
         debug_printf("Page %d\nHost %lx\nPhys %lx\nVirt %lx\nSize %lu\n-----\n", found_index, (uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr, (uint64_t) page->size);
 
@@ -461,11 +481,6 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     return delay;
 }
 
-static uint64_t get_lsb(uint64_t el)
-{
-    return el & ~(el-1);
-}
-
 static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
 {
     char *row;
@@ -478,17 +493,6 @@ static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *in
         row = g_malloc0(size);
 
     char *res = row;
-
-    uint64_t end[3] = {0,0,0};
-    uint64_t start[2] = {0,0};
-    uint64_t old = 0;
-    for(int i=0; i < info->col.n_sections; i++){
-        end[i] = ((1 << info->col.bits[i]) -1) << (info->col.offsets[i] + old);
-        old += info->col.offsets[i] + info->col.bits[i];
-        if (i > 0)
-            start[i-1] = get_lsb(end[i]);
-    }
-
     bool check_once = false;
 
     for(int j=0; j < (1 << info->col.bits[2]); j++){
@@ -498,15 +502,16 @@ static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *in
                 goto finish;
             }
 
-            uint64_t off_phys = (phys & end[0]);
+            uint64_t off_phys = (phys & info->part_row_end);
             if(off_phys) {
                 g_assert(check_once == false);
                 check_once = true;
             }
-            uint64_t sz = MIN(end[0] - off_phys + 1, size);
+            uint64_t sz = MIN(info->part_row_end - off_phys + 1, size);
             if(src_buff){ // copy from src to row
                 memcpy(host, row, sz);
                 debug_printf("copying from %p till %p sz %lu\n", host, (void *) ((uint64_t) host + sz), sz);
+                debug_printf("copying from %lu till %lu sz %lu\n", phys,  phys + sz, sz);
             } else {
                 memcpy(row, host, sz);
             }
@@ -518,11 +523,11 @@ static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *in
                 phys -= off_phys;
             }
 
-            host += start[0];
-            phys += start[0];
+            host += info->part_row_start[0];
+            phys += info->part_row_start[0];
         }
-        host += start[1];
-        phys += start[1];
+        host += info->part_row_start[1];
+        phys += info->part_row_start[1];
     }
 finish:
     g_assert(size == 0);
@@ -637,7 +642,9 @@ static uint64_t perform_rcc_delay(CPURISCVState *env,
             delay = CPU_DELAY(mov_size);
         }
 
+        debug_printf("bef slow\n");
         slow_down_by(env, delay);
+        debug_printf("aft slow\n");
         delay_op += delay;
 
         if(src_row->usage < dest_row->usage){
@@ -753,7 +760,6 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
 
 static RISCVAccess rci_access;
 static int rci_mmu_idx;
-static bool rci_faulted_all = false;
 static TCGMemOpIdx rci_oi;
 static rci_stats rci_stat;
 static char *zero_row;
@@ -831,6 +837,14 @@ static uint64_t perform_rci_missed(CPURISCVState *env)
 
     return delay_op;
 }
+#else 
+
+static void perform_rci_user(target_ulong dest, target_ulong size)
+{
+    void *dest_addr;
+    dest_addr = g2h(dest);
+    memset(dest_addr, MEMSET_BYTE, size);
+}
 #endif
 
 void helper_rci(CPURISCVState *env, target_ulong dest,
@@ -840,12 +854,8 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
         return;
 
 #if defined(CONFIG_USER_ONLY)
-    void *dest_addr;
-
     /* User: no MMU, just copy the data from one side to the other */
-    dest_addr = g2h(dest);
-    memset(dest_addr, MEMSET_BYTE, size);
-
+    perform_rci_user(dest, size);
 #else
     /*
      * System: MMU, make sure to get the correct pages (host addresses)
@@ -894,16 +904,72 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     del_rowlist(&rows);
     del_partiallist(&partial_rows);
     del_riscv_access(&rci_access);
-    rci_faulted_all = false;
 
     debug_printf("#######################\n");
 #endif
 }
 
-void helper_rcik(CPURISCVState *env, target_ulong dest,
+
+#if !defined(CONFIG_USER_ONLY)
+
+static RISCVAccess rcik_access;
+static int rcik_mmu_idx;
+static TCGMemOpIdx rcik_oi;
+static rci_stats rcik_stat;
+// static int rcik_missed[100];
+// static int n_rcik_missed = 0;
+
+#endif
+
+/* row_dest is the guest virtual address representing the row
+ * that we want to memset. */
+void helper_rcik(CPURISCVState *env, target_ulong row_dest,
                         target_ulong size)
 {
+#if !defined(CONFIG_USER_ONLY)
+    dram_cpu_info *info;
+    uint64_t row_size, delay;
 
+
+    /* Only init once */
+    if(rcik_access.pages == NULL) {
+        printf("RCIK request\n");
+        rcik_mmu_idx = cpu_mmu_index(env, false);
+        rcik_oi = make_memop_idx(MO_UB, rcik_mmu_idx);
+        init_riscv_access(&rcik_access, row_dest, 1);
+    }
+
+    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+    row_size = info->col.size;
+
+    init_zero_row(row_size);
+
+    if(size > row_size)
+        size = row_size;
+
+    /* Page fault if needed, but find all pages. Code until here
+     * can re-executed becauses find_all_pages triggers a pf. */
+    rcik_stat.avg_pf.sum++;
+    rcik_access.size = 1;
+
+    // TODO: page faults
+    // TODO: fail if not aligned to row
+    printf("find all pages...\n");
+    find_all_pages(env, &rcik_access, MMU_DATA_STORE, info, rcik_mmu_idx, rcik_oi, GETPC());
+    printf("Phys addr %lu, Vaddr %lu\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
+    g_assert(rcik_access.n_pages == 1);
+    set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, size);
+
+    if (size == row_size) {
+        printf("Full size, full speed\n");
+        delay = PIM_DELAY(row_size);
+    } else {
+        /* All in CPU */
+        printf("CPU delay\n");
+        delay = CPU_DELAY(size);
+    }
+    slow_down_by(env, delay);
+#endif
 }
 
 #if !defined(CONFIG_USER_ONLY)
@@ -915,10 +981,16 @@ static uint64_t calc_perc(uint64_t tot, uint64_t part)
 }
 #endif
 
-static void helper_rci_stat(CPURISCVState *env)
+static void helper_rci_stat(CPURISCVState *env, bool k)
 {
 #if !defined(CONFIG_USER_ONLY)
-    printf("RCI STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+    const char *name = "RCI";
+    const char *name2 = "RCIK";
+    if(k)
+        name = name2;
+
+    printf("%s STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+        name,
         rci_stat.tot_bytes,
 
         rci_stat.in_pim,
@@ -980,10 +1052,13 @@ void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
     switch (val)
     {
     case 0:
-        helper_rci_stat(env);
+        helper_rci_stat(env, false);
         break;
     case 1:
         helper_rcc_stat(env);
+        break;
+    case 2:
+        helper_rci_stat(env, true);
         break;
     
     default:
