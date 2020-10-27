@@ -487,6 +487,7 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
 static void rec_iteration(int level, char **row, hwaddr *phys, void **host,dram_cpu_info *info, uint64_t *size, char *src_buff)
 {
     bool check_once = false;
+    uint64_t host_64;
 
     for(int j=0; j < (1 << info->col.bits[level]); j++){
 
@@ -496,10 +497,9 @@ static void rec_iteration(int level, char **row, hwaddr *phys, void **host,dram_
 
         if (level != 1) {
             rec_iteration(level -1, row, phys, host, info, size, src_buff);
-            // *host += info->part_row_start[level-1];
-            // *phys += info->part_row_start[level-1];
-            *host = (*host & ~(info->col.mask)) |
-                ((*host + info->part_row_start[level-1]) & info->col.mask);
+            host_64 = (uint64_t) *host;
+            *host = (void *) ((host_64 & ~(info->col.mask)) |
+                ((host_64 + info->part_row_start[level-1]) & info->col.mask));
             *phys = (*phys & ~(info->col.mask)) |
                 ((*phys + info->part_row_start[level-1]) & info->col.mask);
             continue;
@@ -526,11 +526,9 @@ static void rec_iteration(int level, char **row, hwaddr *phys, void **host,dram_
             *phys -= off_phys;
         }
 
-        // *host += info->part_row_start[0];
-        // *phys += info->part_row_start[0];
-
-        *host = (*host & ~(info->col.mask)) |
-                ((*host + info->part_row_start[0]) & info->col.mask);
+        host_64 = (uint64_t) *host;
+        *host = (void *) ((host_64 & ~(info->col.mask)) |
+                ((host_64 + info->part_row_start[0]) & info->col.mask));
         *phys = (*phys & ~(info->col.mask)) |
                 ((*phys + info->part_row_start[0]) & info->col.mask);
     }
@@ -552,41 +550,6 @@ static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *in
     char *res = row;
     rec_iteration(DRAM_MAX_BIT_INTERLEAVING-1, &row, &phys, &host, info, &size, src_buff);
 
-    // for(int j=0; j < (1 << info->col.bits[2]); j++){
-    //     for(int i=0; i < (1 << info->col.bits[1]); i++){
-
-    //         if(size == 0) {
-    //             goto finish;
-    //         }
-
-    //         uint64_t off_phys = (phys & info->part_row_end);
-    //         if(off_phys) {
-    //             g_assert(check_once == false);
-    //             check_once = true;
-    //         }
-    //         uint64_t sz = MIN(info->part_row_end - off_phys + 1, size);
-    //         if(src_buff){ // copy from src to row
-    //             memcpy(host, row, sz);
-    //             debug_printf("copying from %p till %p sz %lu\n", host, (void *) ((uint64_t) host + sz), sz);
-    //             debug_printf("copying from %lu till %lu sz %lu\n", phys,  phys + sz, sz);
-    //         } else {
-    //             memcpy(row, host, sz);
-    //         }
-    //         row += sz;
-    //         size -= sz;
-
-    //         if(off_phys) {
-    //             host -= off_phys;
-    //             phys -= off_phys;
-    //         }
-
-    //         host += info->part_row_start[0];
-    //         phys += info->part_row_start[0];
-    //     }
-    //     host += info->part_row_start[1];
-    //     phys += info->part_row_start[1];
-    // }
-// finish:
     g_assert(size == 0);
     return res;
 }
