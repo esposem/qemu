@@ -507,6 +507,8 @@ static void get_partial_rows_bits(dram_cpu_info *info)
 {
     uint64_t end = 0, old = 0;
 
+    info->part_row_end = UINT64_MAX;
+
     for(int i=0; i < info->col.n_sections; i++){
         	end = ((1 << info->col.bits[i]) -1) <<
 			(info->col.offsets[i] + old);
@@ -515,8 +517,8 @@ static void get_partial_rows_bits(dram_cpu_info *info)
 
 		if (i > 0)
 			info->part_row_start[i-1] = get_lsb(end);
-		else
-			info->part_row_end = end;
+		// else
+		// 	info->part_row_end = end;
 
 		if(end < info->part_row_end)
 			info->part_row_end = end;

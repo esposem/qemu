@@ -2,10 +2,11 @@
 #ifndef HW_DRAM_H
 #define HW_DRAM_H
 
+#define DRAM_MAX_BIT_INTERLEAVING 5
 typedef struct dram_element_info {
     uint64_t mask;
-    uint8_t bits[3];
-    int8_t offsets[3];
+    uint8_t bits[DRAM_MAX_BIT_INTERLEAVING];
+    int8_t offsets[DRAM_MAX_BIT_INTERLEAVING];
     uint8_t n_sections;
     uint64_t size;
 } dram_element_info;
@@ -21,7 +22,7 @@ typedef struct dram_cpu_info {
     uint64_t size;
 
     // just to avoid doing it every time
-    uint64_t part_row_start[2];
+    uint64_t part_row_start[DRAM_MAX_BIT_INTERLEAVING -1];
     uint64_t part_row_end;
 } dram_cpu_info;
 
@@ -51,9 +52,21 @@ typedef struct dram_cpu_info {
     [11:0]		col
 */
 
+static inline void print_field(const char *name, int8_t *el)
+{
+    printf("%s:", name);
+    for(int i=0; i < DRAM_MAX_BIT_INTERLEAVING; i++){
+        printf("%d-", el[i]);
+    }
+    printf(" ");
+}
+
 static inline void print_dram_element(char *name, dram_element_info *el)
 {
-    printf("%s: bits:%d-%d-%d off:%d-%d-%d mask:%lx\n", name, el->bits[0], el->bits[1], el->bits[2], el->offsets[0], el->offsets[1], el->offsets[2], el->mask);
+    printf("%s: ", name);
+    print_field("bits",(int8_t *) el->bits);
+    print_field("off", el->offsets);
+    printf("mask:%lx\n", el->mask);
 }
 
 static inline void init_default_dram_elements(dram_cpu_info *dram)

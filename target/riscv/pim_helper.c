@@ -7,6 +7,7 @@
 #include "exec/cpu_ldst.h"
 #include "fpu/softfloat.h"
 #include "internals.h"
+#include <math.h>
 
 #define MEMSET_BYTE 1
 #define ENABLE_DELAY 1
@@ -121,13 +122,14 @@ typedef struct row_data {
 typedef QSIMPLEQ_HEAD(, row_data) row_data_list;
 
 typedef struct avg_t {
-    uint32_t sum;
+    uint64_t sum;
     int n;
 } avg_t;
 
 typedef struct rci_stats {
     avg_t avg_pf;
     avg_t avg_delay;
+    uint64_t del_val[1000];
     uint64_t tot_bytes;
     uint64_t in_pim;
     uint64_t other;
@@ -229,6 +231,7 @@ static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
 
             nocol = get_row_mask(start, info);
 
+            /* search hash table by row index, but save addr as smallest addr within row. */
             row = g_hash_table_lookup(row_table, &nocol);
             debug_printf("Looking for row %lx in hashmap\n", nocol);
 
@@ -238,7 +241,7 @@ static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
                 debug_printf("Row not found in hashmap, add it\n");
                 row = g_new0(row_data, 1);
                 g_assert(row);
-                row->addr = UINT64_MAX;
+                row->addr = start;
                 QSIMPLEQ_INSERT_TAIL(row_list, row, next_row);
                 QSIMPLEQ_INIT(&row->partial_list);
                 g_hash_table_insert(row_table, &nocol, row);
@@ -246,7 +249,7 @@ static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
 
             prow->row_parent = row;
 
-            if(start < row->addr){
+            if(start <= row->addr){
                 row->addr = start;
                 row->host = prow->host;
             }
@@ -481,6 +484,60 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     return delay;
 }
 
+static void rec_iteration(int level, char **row, hwaddr *phys, void **host,dram_cpu_info *info, uint64_t *size, char *src_buff)
+{
+    bool check_once = false;
+
+    for(int j=0; j < (1 << info->col.bits[level]); j++){
+
+        if(*size == 0) {
+            return;
+        }
+
+        if (level != 1) {
+            rec_iteration(level -1, row, phys, host, info, size, src_buff);
+            // *host += info->part_row_start[level-1];
+            // *phys += info->part_row_start[level-1];
+            *host = (*host & ~(info->col.mask)) |
+                ((*host + info->part_row_start[level-1]) & info->col.mask);
+            *phys = (*phys & ~(info->col.mask)) |
+                ((*phys + info->part_row_start[level-1]) & info->col.mask);
+            continue;
+        }
+
+        uint64_t off_phys = (*phys & info->part_row_end);
+        if(off_phys) {
+            g_assert(check_once == false);
+            check_once = true;
+        }
+        uint64_t sz = MIN(info->part_row_end - off_phys + 1, *size);
+        if(src_buff){ // copy from src to row
+            memcpy(host, *row, sz);
+            debug_printf("copying from %p till %p sz %lu\n", *host, (void *) ((uint64_t) host + sz), sz);
+            debug_printf("copying from %lu till %lu sz %lu\n", *phys,  *phys + sz, sz);
+        } else {
+            memcpy(*row, *host, sz);
+        }
+        *row += sz;
+        *size -= sz;
+
+        if(off_phys) {
+            *host -= off_phys;
+            *phys -= off_phys;
+        }
+
+        // *host += info->part_row_start[0];
+        // *phys += info->part_row_start[0];
+
+        *host = (*host & ~(info->col.mask)) |
+                ((*host + info->part_row_start[0]) & info->col.mask);
+        *phys = (*phys & ~(info->col.mask)) |
+                ((*phys + info->part_row_start[0]) & info->col.mask);
+    }
+
+
+}
+
 static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
 {
     char *row;
@@ -493,43 +550,43 @@ static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *in
         row = g_malloc0(size);
 
     char *res = row;
-    bool check_once = false;
+    rec_iteration(DRAM_MAX_BIT_INTERLEAVING-1, &row, &phys, &host, info, &size, src_buff);
 
-    for(int j=0; j < (1 << info->col.bits[2]); j++){
-        for(int i=0; i < (1 << info->col.bits[1]); i++){
+    // for(int j=0; j < (1 << info->col.bits[2]); j++){
+    //     for(int i=0; i < (1 << info->col.bits[1]); i++){
 
-            if(size == 0) {
-                goto finish;
-            }
+    //         if(size == 0) {
+    //             goto finish;
+    //         }
 
-            uint64_t off_phys = (phys & info->part_row_end);
-            if(off_phys) {
-                g_assert(check_once == false);
-                check_once = true;
-            }
-            uint64_t sz = MIN(info->part_row_end - off_phys + 1, size);
-            if(src_buff){ // copy from src to row
-                memcpy(host, row, sz);
-                debug_printf("copying from %p till %p sz %lu\n", host, (void *) ((uint64_t) host + sz), sz);
-                debug_printf("copying from %lu till %lu sz %lu\n", phys,  phys + sz, sz);
-            } else {
-                memcpy(row, host, sz);
-            }
-            row += sz;
-            size -= sz;
+    //         uint64_t off_phys = (phys & info->part_row_end);
+    //         if(off_phys) {
+    //             g_assert(check_once == false);
+    //             check_once = true;
+    //         }
+    //         uint64_t sz = MIN(info->part_row_end - off_phys + 1, size);
+    //         if(src_buff){ // copy from src to row
+    //             memcpy(host, row, sz);
+    //             debug_printf("copying from %p till %p sz %lu\n", host, (void *) ((uint64_t) host + sz), sz);
+    //             debug_printf("copying from %lu till %lu sz %lu\n", phys,  phys + sz, sz);
+    //         } else {
+    //             memcpy(row, host, sz);
+    //         }
+    //         row += sz;
+    //         size -= sz;
 
-            if(off_phys) {
-                host -= off_phys;
-                phys -= off_phys;
-            }
+    //         if(off_phys) {
+    //             host -= off_phys;
+    //             phys -= off_phys;
+    //         }
 
-            host += info->part_row_start[0];
-            phys += info->part_row_start[0];
-        }
-        host += info->part_row_start[1];
-        phys += info->part_row_start[1];
-    }
-finish:
+    //         host += info->part_row_start[0];
+    //         phys += info->part_row_start[0];
+    //     }
+    //     host += info->part_row_start[1];
+    //     phys += info->part_row_start[1];
+    // }
+// finish:
     g_assert(size == 0);
     return res;
 }
@@ -642,9 +699,7 @@ static uint64_t perform_rcc_delay(CPURISCVState *env,
             delay = CPU_DELAY(mov_size);
         }
 
-        debug_printf("bef slow\n");
         slow_down_by(env, delay);
-        debug_printf("aft slow\n");
         delay_op += delay;
 
         if(src_row->usage < dest_row->usage){
@@ -737,8 +792,9 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
     g_assert(n_rcc_missed_src == 0 && n_rcc_missed_dest == 0);
 
     /* Final stats bookeeping and cleanup */
-    rcc_stat.general.avg_delay.n++;
     rcc_stat.general.avg_delay.sum += delay_op;
+    rcc_stat.general.del_val[rcc_stat.general.avg_delay.n] = delay_op;
+    rcc_stat.general.avg_delay.n++;
     rcc_stat.general.avg_pf.sum -= 2;
     rcc_stat.general.avg_pf.n++;
 
@@ -821,7 +877,7 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
 
 static uint64_t perform_rci_missed(CPURISCVState *env)
 {
-    uint64_t delay_op;
+    uint64_t delay_op = 0;
 
     /* rci_missed pages (the ones that have to be set manually) */
     for (int i=0; i < n_rci_missed; i++) {
@@ -896,8 +952,9 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     delay_op += perform_rci_missed(env);
 
     /* Final stats, and cleanup */
-    rci_stat.avg_delay.n++;
     rci_stat.avg_delay.sum += delay_op;
+    rci_stat.del_val[rci_stat.avg_delay.n] = delay_op;
+    rci_stat.avg_delay.n++;
     rci_stat.avg_pf.sum--;
     rci_stat.avg_pf.n++;
 
@@ -916,9 +973,6 @@ static RISCVAccess rcik_access;
 static int rcik_mmu_idx;
 static TCGMemOpIdx rcik_oi;
 static rci_stats rcik_stat;
-// static int rcik_missed[100];
-// static int n_rcik_missed = 0;
-
 #endif
 
 /* row_dest is the guest virtual address representing the row
@@ -929,11 +983,11 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 #if !defined(CONFIG_USER_ONLY)
     dram_cpu_info *info;
     uint64_t row_size, delay;
-
+    hwaddr offset_row;
 
     /* Only init once */
     if(rcik_access.pages == NULL) {
-        printf("RCIK request\n");
+        printf("RCIK request %lu\n", (uint64_t) row_dest);
         rcik_mmu_idx = cpu_mmu_index(env, false);
         rcik_oi = make_memop_idx(MO_UB, rcik_mmu_idx);
         init_riscv_access(&rcik_access, row_dest, 1);
@@ -944,20 +998,31 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
     init_zero_row(row_size);
 
-    if(size > row_size)
+    if(size > row_size){
+        printf("Size was %ld, now is %ld\n", (uint64_t) size, row_size);
         size = row_size;
+    }
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
     rcik_stat.avg_pf.sum++;
     rcik_access.size = 1;
 
-    // TODO: page faults
-    // TODO: fail if not aligned to row
-    printf("find all pages...\n");
+    // TODO: page faults? try with row = 8K and no pre-touch
     find_all_pages(env, &rcik_access, MMU_DATA_STORE, info, rcik_mmu_idx, rcik_oi, GETPC());
-    printf("Phys addr %lu, Vaddr %lu\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
+    printf("Phys addr %lx, Vaddr %lu\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
     g_assert(rcik_access.n_pages == 1);
+
+    offset_row = rcik_access.pages[0].phys_addr & info->col.mask;
+
+    if(offset_row != 0){
+        printf("Size was %ld, now is %ld\n", (uint64_t) size, MIN(row_size- offset_row, size));
+        size = MIN(row_size- offset_row, size);
+    }
+
+    /* Stats bookeeping */
+    rcik_stat.tot_bytes += size;
+
     set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, size);
 
     if (size == row_size) {
@@ -969,6 +1034,15 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
         delay = CPU_DELAY(size);
     }
     slow_down_by(env, delay);
+
+    /* Final stats, and cleanup */
+    rcik_stat.avg_delay.sum += delay;
+    rcik_stat.del_val[rcik_stat.avg_delay.n] = delay;
+    rcik_stat.avg_delay.n++;
+    rcik_stat.avg_pf.sum--;
+    rcik_stat.avg_pf.n++;
+
+    del_riscv_access(&rcik_access);
 #endif
 }
 
@@ -979,6 +1053,36 @@ static uint64_t calc_perc(uint64_t tot, uint64_t part)
         return 0;
     return part * 100 / tot;
 }
+
+static double calc_stddev(uint64_t sum, uint64_t *el, int size)
+{
+    double variance = 0;
+    double avg;
+
+    if(size == 0){
+        printf("STTDEV N is 0\n");
+        return 0;
+    }
+
+
+    avg = sum / size;
+
+    for (int i=0; i < size; i++) {
+        variance += (el[i] - avg) * (el[i] - avg);
+    }
+    variance /= size-1;
+    return sqrt(variance);
+}
+
+static double calc_stderr(double stddev, int n)
+{
+    if(n == 0){
+        printf("STDDER N is 0\n"); //TODO: it's 0 somehow
+        return 0;
+    }
+
+    return stddev / sqrt(n);
+}
 #endif
 
 static void helper_rci_stat(CPURISCVState *env, bool k)
@@ -986,10 +1090,15 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
 #if !defined(CONFIG_USER_ONLY)
     const char *name = "RCI";
     const char *name2 = "RCIK";
+    double stddev, stdderr;
+
     if(k)
         name = name2;
 
-    printf("%s STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+    stddev = calc_stddev(rci_stat.avg_delay.sum, rci_stat.del_val, rci_stat.avg_delay.n);
+    stdderr = calc_stderr(stddev, rci_stat.avg_delay.n);
+
+    printf("%s STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %ld\nAvg delay/call: %d\nStddev delay/call: %f\nStderr delay/call: %f\n----------------\n",
         name,
         rci_stat.tot_bytes,
 
@@ -1004,7 +1113,10 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
         calc_perc(rci_stat.tot_bytes, rci_stat.other),
 
         rci_stat.avg_pf.n == 0 ? 0 : (rci_stat.avg_pf.sum / rci_stat.avg_pf.n),
-        rci_stat.avg_delay.n == 0 ? 0 : ((uint32_t) rci_stat.avg_delay.sum / rci_stat.avg_delay.n));
+        rci_stat.avg_delay.n == 0 ? 0 : ((uint32_t) rci_stat.avg_delay.sum / rci_stat.avg_delay.n),
+
+        stddev, stdderr
+        );
 
     memset(&rci_stat, 0, sizeof(rci_stat));
 #endif
@@ -1013,7 +1125,12 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
 static void helper_rcc_stat(CPURISCVState *env)
 {
 #if !defined(CONFIG_USER_ONLY)
-    printf("RCC STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %d\nAvg delay/call: %d\n----------------\n",
+    double stddev, stdderr;
+
+    stddev = calc_stddev(rcc_stat.general.avg_delay.sum, rcc_stat.general.del_val, rcc_stat.general.avg_delay.n);
+    stdderr = calc_stderr(stddev, rcc_stat.general.avg_delay.n);
+
+    printf("RCC STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %ld\nAvg delay/call: %d\nStddev delay/call: %f\nStderr delay/call: %f\n----------------\n",
         rcc_stat.general.tot_bytes,
 
         rcc_stat.general.in_pim,
@@ -1033,7 +1150,9 @@ static void helper_rcc_stat(CPURISCVState *env)
 
         rcc_stat.general.avg_pf.n == 0 ? 0 : (rcc_stat.general.avg_pf.sum / rcc_stat.general.avg_pf.n),
 
-        rcc_stat.general.avg_delay.n == 0 ? 0 : ((uint32_t) rcc_stat.general.avg_delay.sum / rcc_stat.general.avg_delay.n));
+        rcc_stat.general.avg_delay.n == 0 ? 0 : ((uint32_t) rcc_stat.general.avg_delay.sum / rcc_stat.general.avg_delay.n),
+
+        stddev, stdderr);
 
     memset(&rcc_stat, 0, sizeof(rcc_stat));
 #endif
