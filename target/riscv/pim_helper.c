@@ -422,7 +422,6 @@ static int rcc_mmu_idx;
 static bool rcc_faulted_all_src = false, rcc_faulted_all_dest = false;
 static TCGMemOpIdx rcc_oi;
 static rcc_stats rcc_stat;
-static rcc_stats rcck_stat;
 static int rcc_missed_src[100];
 static int n_rcc_missed_src;
 static int rcc_missed_dest[100];
@@ -1075,6 +1074,7 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
 static RISCVAccess rcck_src_access, rcck_dest_access;
 static int rcck_mmu_idx;
+static rcc_stats rcck_stat;
 static bool rcck_faulted_all_src = false, rcck_faulted_all_dest = false;
 static TCGMemOpIdx rcck_oi;
 
