@@ -505,24 +505,22 @@ static uint64_t get_lsb(uint64_t el)
 
 static void get_partial_rows_bits(dram_cpu_info *info)
 {
-    uint64_t end = 0, old = 0;
+    uint64_t end = 0;
 
     info->part_row_end = UINT64_MAX;
 
     for(int i=0; i < info->col.n_sections; i++){
-        	end = ((1 << info->col.bits[i]) -1) <<
-			(info->col.offsets[i] + old);
+        	end = ((1 << info->col.bits[i]) -1) << info->col.offsets[i];
 
-        	old += info->col.offsets[i] + info->col.bits[i];
-
-		if (i > 0)
+		if (i > 0) {
 			info->part_row_start[i-1] = get_lsb(end);
-		// else
-		// 	info->part_row_end = end;
+            printf("Part row start[%d] = %lx\n",i-1, info->part_row_start[i-1]);
+        }
 
 		if(end < info->part_row_end)
 			info->part_row_end = end;
 	}
+    printf("Part row end = %lx\n",info->part_row_end);
 }
 
 static void riscv_cpu_init(Object *obj)

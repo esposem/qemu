@@ -191,7 +191,7 @@ static void create_dram_fdt_el(dram_element_info *el, const char *name,  void *f
         g_free(subname);
     }
 
-    printf("Property %s val %s\n", name, col_name);
+    // printf("Property %s val %s\n", name, col_name);
     qemu_fdt_setprop_string(fdt, mem_name, name, col_name);
     g_free(col_name);
 }

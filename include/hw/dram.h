@@ -6,7 +6,7 @@
 typedef struct dram_element_info {
     uint64_t mask;
     uint8_t bits[DRAM_MAX_BIT_INTERLEAVING];
-    int8_t offsets[DRAM_MAX_BIT_INTERLEAVING];
+    int8_t offsets[DRAM_MAX_BIT_INTERLEAVING]; // offset abs to bit 0
     uint8_t n_sections;
     uint64_t size;
 } dram_element_info;
@@ -18,12 +18,12 @@ typedef struct dram_cpu_info {
     dram_element_info row;
     dram_element_info subarr;
     dram_element_info col;
-    uint64_t offset; // shift offset. If > 0, >>. If < 0, <<.
+    uint64_t offset;
     uint64_t size;
 
     // just to avoid doing it every time
-    uint64_t part_row_start[DRAM_MAX_BIT_INTERLEAVING -1];
-    uint64_t part_row_end;
+    uint64_t part_row_start[DRAM_MAX_BIT_INTERLEAVING -1]; // LSB of each part of the mask
+    uint64_t part_row_end; // portion of the mask nearest to the LSB
 } dram_cpu_info;
 
 
@@ -61,12 +61,13 @@ static inline void print_field(const char *name, int8_t *el)
     printf(" ");
 }
 
-static inline void print_dram_element(char *name, dram_element_info *el)
+static inline void print_dram_element(const char *name, dram_element_info *el)
 {
     printf("%s: ", name);
     print_field("bits",(int8_t *) el->bits);
     print_field("off", el->offsets);
-    printf("mask:%lx\n", el->mask);
+    printf("mask:%lx ", el->mask);
+    printf("size:%ld\n", el->size);
 }
 
 static inline void init_default_dram_elements(dram_cpu_info *dram)
@@ -132,12 +133,12 @@ static inline int parse_dram_el_bits(dram_element_info *el)
 
         el->mask |= ((1 << new_bits) - 1) << shift_off;
 
-        shift_off -= MIN(sf, ef);
+        // shift_off -= MIN(sf, ef);
     } else {
         new_bits = 1;
         shift_off = sp;
         el->mask |= 1l << shift_off;
-        shift_off -= sf;
+        // shift_off -= (sf+1);
     }
     el->bits[el->n_sections] = new_bits;
     new_bits = 0;
@@ -213,9 +214,16 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
             if(parse_dram_el_bits(el)) {
                 printf("Line '%s' not correctly formed. Ignoring\n", buff);
             }
-            print_dram_element(op, el);
+            // print_dram_element(op, el);
         }
     }
+
+    print_dram_element("col", &dram_info->col);
+    print_dram_element("bank", &dram_info->bank);
+    print_dram_element("row", &dram_info->row);
+    print_dram_element("subarr", &dram_info->subarr);
+    print_dram_element("rank", &dram_info->rank);
+    print_dram_element("channel", &dram_info->channel);
     printf("addr %lx sz %lx\n", dram_info->offset, dram_info->size);
     printf("---------------------\n");
 
