@@ -1025,10 +1025,10 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
     init_zero_row(row_size);
 
-    if(size > row_size){
-        printf("Size was %ld, now is %ld\n", (uint64_t) size, row_size);
-        size = row_size;
-    }
+    // if(size > row_size){
+    //     printf("Size was %ld, now is %ld\n", (uint64_t) size, row_size);
+    //     size = row_size;
+    // }
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
@@ -1041,17 +1041,17 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
     offset_row = rcik_access.pages[0].phys_addr & info->col.mask;
 
-    if(offset_row != 0){
-        printf("Size was %ld, now is %ld\n", (uint64_t) size, MIN(row_size- offset_row, size));
-        size = MIN(row_size- offset_row, size);
-    }
+    // if(offset_row != 0){
+    //     printf("Size was %ld, now is %ld\n", (uint64_t) size, MIN(row_size- offset_row, size));
+    //     size = MIN(row_size- offset_row, size);
+    // }
 
     /* Stats bookeeping */
     rcik_stat.tot_bytes += size;
 
     set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, size);
 
-    if (size == row_size) {
+    if (size == row_size && offset_row == 0) {
         // printf("Full size, full speed\n");
         delay = PIM_DELAY(row_size);
         rcik_stat.in_pim += size;
@@ -1318,4 +1318,18 @@ void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
         printf("helper_stat: Command %ld not recognized!\n",(uint64_t) val);
         break;
     }
+}
+
+void helper_stat_i(target_ulong val)
+{
+#if !defined(CONFIG_USER_ONLY)
+    rcik_stat.tot_bytes += val;
+#endif
+}
+
+void helper_stat_c(target_ulong val)
+{
+#if !defined(CONFIG_USER_ONLY)
+    rcck_stat.general.tot_bytes += val;
+#endif
 }

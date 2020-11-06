@@ -271,6 +271,32 @@ static bool trans_stat(DisasContext *ctx, arg_stat *a)
     return true;
 }
 
+static bool trans_stat_c(DisasContext *ctx, arg_stat_c *a)
+{
+    TCGv size = tcg_temp_new();
+
+    gen_get_gpr(size, a->rs2);
+
+    gen_helper_stat_c(size);
+
+    tcg_temp_free(size);
+
+    return true;
+}
+
+static bool trans_stat_i(DisasContext *ctx, arg_stat_i *a)
+{
+    TCGv size = tcg_temp_new();
+
+    gen_get_gpr(size, a->rs2);
+
+    gen_helper_stat_i(size);
+
+    tcg_temp_free(size);
+
+    return true;
+}
+
 static bool trans_lbu(DisasContext *ctx, arg_lbu *a)
 {
     return gen_load(ctx, a, MO_UB);

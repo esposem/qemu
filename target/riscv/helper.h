@@ -10,6 +10,9 @@ DEF_HELPER_3(rci, void, env, tl, tl)
 DEF_HELPER_3(stat, void, env, tl, tl)
 DEF_HELPER_3(rcik, void, env, tl, tl)
 DEF_HELPER_4(rcck, void, env, tl, tl, tl)
+DEF_HELPER_1(stat_i, void, tl)
+DEF_HELPER_1(stat_c, void, tl)
+
 
 /* Floating Point - fused */
 DEF_HELPER_FLAGS_4(fmadd_s, TCG_CALL_NO_RWG, i64, env, i64, i64, i64)
