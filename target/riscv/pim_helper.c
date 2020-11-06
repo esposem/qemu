@@ -15,6 +15,7 @@
 #define CACHE_LINE_SIZE 64
 
 #define DRAM_DEBUG 0
+#define USE_STDEV_STDERR 0
 
 #if DRAM_DEBUG
 #define  debug_printf(fmt, ...)  do { printf(fmt, ## __VA_ARGS__); }while(0);
@@ -130,7 +131,9 @@ typedef struct avg_t {
 typedef struct rci_stats {
     avg_t avg_pf;
     avg_t avg_delay;
+#if USE_STDEV_STDERR
     uint64_t del_val[STAT_MAX_DEL_VAL];
+#endif
     uint64_t tot_bytes;
     uint64_t in_pim;
     uint64_t other;
@@ -811,8 +814,10 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
 
     /* Final stats bookeeping and cleanup */
     rcc_stat.general.avg_delay.sum += delay_op;
+#if USE_STDEV_STDERR
     g_assert(rcc_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
     rcc_stat.general.del_val[rcc_stat.general.avg_delay.n] = delay_op;
+#endif
     rcc_stat.general.avg_delay.n++;
     rcc_stat.general.avg_pf.sum -= 2;
     rcc_stat.general.avg_pf.n++;
@@ -972,8 +977,10 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
 
     /* Final stats, and cleanup */
     rci_stat.avg_delay.sum += delay_op;
+#if USE_STDEV_STDERR
     g_assert(rci_stat.avg_delay.n < STAT_MAX_DEL_VAL);
     rci_stat.del_val[rci_stat.avg_delay.n] = delay_op;
+#endif
     rci_stat.avg_delay.n++;
     rci_stat.avg_pf.sum--;
     rci_stat.avg_pf.n++;
@@ -1028,7 +1035,6 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
     rcik_stat.avg_pf.sum++;
     rcik_access.size = 1;
 
-    // TODO: page fault. Use 8k and no memset
     find_all_pages(env, &rcik_access, MMU_DATA_STORE, info, rcik_mmu_idx, rcik_oi, GETPC());
     // printf("Phys addr %lx, Vaddr %lx\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
     g_assert(rcik_access.n_pages == 1);
@@ -1059,8 +1065,10 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
     /* Final stats, and cleanup */
     rcik_stat.avg_delay.sum += delay;
+#if USE_STDEV_STDERR
     g_assert(rcik_stat.avg_delay.n < STAT_MAX_DEL_VAL);
     rcik_stat.del_val[rcik_stat.avg_delay.n] = delay;
+#endif
     rcik_stat.avg_delay.n++;
     rcik_stat.avg_pf.sum--;
     rcik_stat.avg_pf.n++;
@@ -1108,7 +1116,6 @@ void helper_rcck(CPURISCVState *env, target_ulong src,
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    // TODO: page fault. Use 8k and no memset
 
     /* Pre-fault all src pages once */
     if(rcck_faulted_all_src == false) {
@@ -1135,8 +1142,10 @@ void helper_rcck(CPURISCVState *env, target_ulong src,
 
     /* Final stats bookeeping and cleanup */
     rcck_stat.general.avg_delay.sum += delay_op;
+#if USE_STDEV_STDERR
     g_assert(rcck_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
     rcck_stat.general.del_val[rcck_stat.general.avg_delay.n] = delay_op;
+#endif
     rcck_stat.general.avg_delay.n++;
     rcck_stat.general.avg_pf.sum -= 2;
     rcck_stat.general.avg_pf.n++;
@@ -1159,6 +1168,7 @@ static uint64_t calc_perc(uint64_t tot, uint64_t part)
     return part * 100 / tot;
 }
 
+#if USE_STDEV_STDERR
 static double calc_stddev(uint64_t sum, uint64_t *el, int size)
 {
     double variance = 0;
@@ -1186,6 +1196,8 @@ static double calc_stderr(double stddev, int n)
 
     return stddev / sqrt(n);
 }
+#endif /* USE_STDEV_STDERR */
+
 #endif
 
 static void helper_rci_stat(CPURISCVState *env, bool k)
@@ -1193,7 +1205,7 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
 #if !defined(CONFIG_USER_ONLY)
     const char *name = "RCI";
     const char *name2 = "RCIK";
-    double stddev, stdderr;
+    double stddev = 0, stdderr = 0;
     rci_stats *stat = &rci_stat;
 
     if(k){
@@ -1201,8 +1213,10 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
         stat = &rcik_stat;
     }
 
+#if USE_STDEV_STDERR
     stddev = calc_stddev(stat->avg_delay.sum, stat->del_val, stat->avg_delay.n);
     stdderr = calc_stderr(stddev, stat->avg_delay.n);
+#endif
 
     printf("%s STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %ld\nAvg delay/call: %d\nStddev delay/call: %f\nStderr delay/call: %f\n----------------\n",
         name,
@@ -1233,7 +1247,7 @@ static void helper_rcc_stat(CPURISCVState *env, bool k)
 #if !defined(CONFIG_USER_ONLY)
     const char *name = "RCC";
     const char *name2 = "RCCK";
-    double stddev, stdderr;
+    double stddev = 0, stdderr = 0;
     rcc_stats *stat = &rcc_stat;
 
     if(k){
@@ -1241,8 +1255,10 @@ static void helper_rcc_stat(CPURISCVState *env, bool k)
         stat = &rcck_stat;
     }
 
+#if USE_STDEV_STDERR
     stddev = calc_stddev(stat->general.avg_delay.sum, stat->general.del_val, stat->general.avg_delay.n);
     stdderr = calc_stderr(stddev, stat->general.avg_delay.n);
+#endif
 
     printf("%s STATS:\n\tProcessed:\t%ld\n\tPIM:\t%ld\t%ld%%\n\t\tFPM:\t%ld\t%ld%%\n\t\tPSM:\t%ld\t%ld%%\n\tCPU:\t%ld\t%ld%%\n\tOther:\t%ld\t%ld%%\nAvg pf/call: %ld\nAvg delay/call: %d\nStddev delay/call: %f\nStderr delay/call: %f\n----------------\n",
         name,
