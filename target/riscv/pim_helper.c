@@ -568,7 +568,7 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
         }
 
         uint64_t sz = MIN(info->part_row_end + 1, *size);
-        memmove(host_dest, host_src, sz);
+        memcpy(host_dest, host_src, sz);
         // printf("copying from %lx till %lx sz %lu\n", phys_src,  phys_src + sz, sz);
         *size -= sz;
 
@@ -650,7 +650,7 @@ static void perform_rcc_op(partial_row_list *partial_src,
         mov_size = MIN(srcs, dests);
         debug_printf("Move %lu\n", mov_size);
 
-        memmove(dest_part->host, src_part->host, mov_size);
+        memcpy(dest_part->host, src_part->host, mov_size);
 
         if(srcs < dests) {
             src_part = QSIMPLEQ_NEXT(src_part, next_partial);
