@@ -10,7 +10,7 @@
 #include <math.h>
 
 #define MEMSET_BYTE 1
-#define ENABLE_DELAY 1
+#define ENABLE_DELAY 0
 
 #define CACHE_LINE_SIZE 64
 
@@ -513,10 +513,7 @@ static void rec_iteration(int level, char **row, hwaddr phys, void *host,dram_cp
 
             host_64 = (uint64_t) host;
             host = (void *) get_next_address(host_64, level-1, info);
-            // hwaddr oldp = *phys;
             phys = get_next_address(phys, level-1, info);
-            // printf("Should have added %lx to start\n", info->part_row_start[level-1]);
-            // printf("%lx -> %lx\n", oldp,  phys);
             continue;
         }
 
@@ -570,19 +567,10 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
             continue;
         }
 
-        uint64_t off_phys = (phys_src & info->part_row_end);
-        uint64_t sz = MIN(info->part_row_end - off_phys + 1, *size);
-        memcpy(host_dest, host_src, sz);
+        uint64_t sz = MIN(info->part_row_end + 1, *size);
+        memmove(host_dest, host_src, sz);
         // printf("copying from %lx till %lx sz %lu\n", phys_src,  phys_src + sz, sz);
         *size -= sz;
-
-        if(off_phys) {
-            host_src -= off_phys;
-            phys_src -= off_phys;
-
-            host_dest -= off_phys;
-            phys_dest -= off_phys;
-        }
 
         host_64 = (uint64_t) host_src;
         host_src = (void *) get_next_address(host_64, 0, info);
@@ -591,9 +579,7 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
         host_64 = (uint64_t) host_dest;
         host_dest = (void *) get_next_address(host_64, 0, info);
         phys_dest = get_next_address(phys_dest, 0, info);
-
     }
-
 
 }
 
@@ -1004,8 +990,7 @@ static rci_stats rcik_stat;
 
 /* row_dest is the guest virtual address representing the row
  * that we want to memset. */
-void helper_rcik(CPURISCVState *env, target_ulong row_dest,
-                        target_ulong size)
+void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 {
 #if !defined(CONFIG_USER_ONLY)
     dram_cpu_info *info;
@@ -1025,11 +1010,6 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
 
     init_zero_row(row_size);
 
-    // if(size > row_size){
-    //     printf("Size was %ld, now is %ld\n", (uint64_t) size, row_size);
-    //     size = row_size;
-    // }
-
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
     rcik_stat.avg_pf.sum++;
@@ -1039,28 +1019,18 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest,
     // printf("Phys addr %lx, Vaddr %lx\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
     g_assert(rcik_access.n_pages == 1);
 
+    // if the row is unaligned, error. Keep the instrucion as simple as poss
     offset_row = rcik_access.pages[0].phys_addr & info->col.mask;
-
-    // if(offset_row != 0){
-    //     printf("Size was %ld, now is %ld\n", (uint64_t) size, MIN(row_size- offset_row, size));
-    //     size = MIN(row_size- offset_row, size);
-    // }
+    g_assert(offset_row == 0);
 
     /* Stats bookeeping */
-    rcik_stat.tot_bytes += size;
+    rcik_stat.tot_bytes += row_size;
 
-    set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, size);
+    set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, row_size);
 
-    if (size == row_size && offset_row == 0) {
-        // printf("Full size, full speed\n");
-        delay = PIM_DELAY(row_size);
-        rcik_stat.in_pim += size;
-
-    } else {
-        /* All in CPU */
-        // printf("CPU delay\n");
-        delay = CPU_DELAY(size);
-    }
+    // printf("Full size, full speed\n");
+    delay = PIM_DELAY(row_size);
+    rcik_stat.in_pim += row_size;
     slow_down_by(env, delay);
 
     /* Final stats, and cleanup */
@@ -1088,18 +1058,16 @@ static TCGMemOpIdx rcck_oi;
 
 #endif
 
-void helper_rcck(CPURISCVState *env, target_ulong src,
-                        target_ulong dest, target_ulong size)
+void helper_rcck(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
-    if(size == 0)
-        return;
 
 #if !defined(CONFIG_USER_ONLY)
     dram_cpu_info *info;
     uint64_t delay_op = 0;
+    hwaddr row_size;
 
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
-    g_assert(size == info->col.size);
+    row_size = info->col.size;
 
     /* Only init once */
     if(rcck_src_access.pages == NULL) {
@@ -1131,14 +1099,25 @@ void helper_rcck(CPURISCVState *env, target_ulong src,
         rcck_faulted_all_dest = true;
     }
 
-    rcck_stat.general.tot_bytes += size;
+    rcck_stat.general.tot_bytes += row_size;
+
+    hwaddr phys_src = rcck_src_access.pages[0].phys_addr;
+    hwaddr phys_dest = rcck_dest_access.pages[0].phys_addr;
+    hwaddr offset_src, offset_dest;
+
+    offset_src = phys_src & info->col.mask;
+    offset_dest = phys_dest & info->col.mask;
+    g_assert(offset_src == 0);
+    g_assert(offset_dest == 0);
 
     /* Core operation, perform the actual copy */
-    row_memcpy(rcck_src_access.pages[0].phys_addr,
+    row_memcpy(phys_src,
                rcck_src_access.pages[0].host_addr,
-               rcck_dest_access.pages[0].phys_addr,
-               rcck_dest_access.pages[0].host_addr, info, info->col.size);
-    delay_op = fpm_psm_delay(env, info->col.size, rcck_src_access.pages[0].phys_addr, rcck_dest_access.pages[0].phys_addr, &rcck_stat);
+               phys_dest,
+               rcck_dest_access.pages[0].host_addr, info, row_size);
+
+    /* Calculate the actual delay */
+    delay_op = fpm_psm_delay(env, row_size, phys_src, phys_dest, &rcck_stat);
 
     /* Final stats bookeeping and cleanup */
     rcck_stat.general.avg_delay.sum += delay_op;
@@ -1324,6 +1303,8 @@ void helper_stat_i(target_ulong val)
 {
 #if !defined(CONFIG_USER_ONLY)
     rcik_stat.tot_bytes += val;
+    rcik_stat.avg_delay.sum += CPU_DELAY(val);
+    rcik_stat.avg_delay.n++;
 #endif
 }
 
@@ -1331,5 +1312,7 @@ void helper_stat_c(target_ulong val)
 {
 #if !defined(CONFIG_USER_ONLY)
     rcck_stat.general.tot_bytes += val;
+    rcck_stat.general.avg_delay.sum += CPU_DELAY(val);
+    rcck_stat.general.avg_delay.n++;
 #endif
 }

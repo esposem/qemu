@@ -202,7 +202,7 @@ static bool gen_rcc(DisasContext *ctx, arg_rcc *a, bool k)
     gen_get_gpr(size, a->rd);
 
     if(k){
-        gen_helper_rcck(cpu_env, src, dest, size);
+        gen_helper_rcck(cpu_env, src, dest);
     } else {
         gen_helper_rcc(cpu_env, src, dest, size);
     }
@@ -235,7 +235,7 @@ static bool gen_rci(DisasContext *ctx, arg_rci *a, bool k)
     gen_get_gpr(size, a->rs2);
 
     if (k) {
-        gen_helper_rcik(cpu_env, dest, size);
+        gen_helper_rcik(cpu_env, dest);
     } else {
         gen_helper_rci(cpu_env, dest, size);
     }
