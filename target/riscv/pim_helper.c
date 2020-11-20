@@ -135,13 +135,13 @@ static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
     hwaddr sizes = 0;
     hwaddr tot = get_el_value(&info->bank, phys);
     sizes = info->bank.size;
-    tot += get_el_value(&info->row, phys) * sizes;
+    tot |= get_el_value(&info->row, phys) * sizes;
     sizes *= info->row.size;
-    tot += get_el_value(&info->subarr, phys) * sizes;
+    tot |= get_el_value(&info->subarr, phys) * sizes;
     sizes *= info->subarr.size;
-    tot += get_el_value(&info->rank, phys)* sizes;
+    tot |= get_el_value(&info->rank, phys)* sizes;
     sizes *= info->rank.size;
-    tot += get_el_value(&info->channel, phys) * sizes;
+    tot |= get_el_value(&info->channel, phys) * sizes;
     sizes *= info->channel.size;
 
     return tot;
