@@ -540,13 +540,13 @@ static void riscv_cpu_init(Object *obj)
     env->lsb_nocol = UINT64_MAX;
     uint64_t lsb;
 
-    if((lsb = get_lsb(cpu->dram_info.channel.mask)) < env->lsb_nocol)
+    if((lsb = get_lsb(cpu->dram_info.channel.mask)) < env->lsb_nocol && lsb != 0)
         env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.rank.mask)) < env->lsb_nocol)
+    if((lsb = get_lsb(cpu->dram_info.rank.mask)) < env->lsb_nocol && lsb != 0)
         env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.bank.mask)) < env->lsb_nocol)
+    if((lsb = get_lsb(cpu->dram_info.bank.mask)) < env->lsb_nocol && lsb != 0)
         env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.row.mask)) < env->lsb_nocol)
+    if((lsb = get_lsb(cpu->dram_info.row.mask)) < env->lsb_nocol && lsb != 0)
         env->lsb_nocol = lsb;
 
     printf("LSB IS %lx\n", env->lsb_nocol);

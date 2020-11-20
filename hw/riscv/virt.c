@@ -184,11 +184,20 @@ static void create_dram_fdt_el(dram_element_info *el, const char *name,  void *f
 
     for(int i=0; i < el->n_sections; i++) {
         char *subname = g_strdup_printf("%d:%d", el->bits[i], el->offsets[i]);
-
         char *temp = col_name;
         col_name = g_strjoin(" ", col_name, subname, NULL);
         g_free(temp);
         g_free(subname);
+
+        if(el->rand_bits[i][0] > 0){
+            for(int j=0; j <= el->rand_bits[i][0]; j++){
+                subname = g_strdup_printf("%d", el->rand_bits[i][j]);
+                temp = col_name;
+                col_name = g_strjoin("-", col_name, subname, NULL);
+                g_free(temp);
+                g_free(subname);
+            }
+        }
     }
 
     // printf("Property %s val %s\n", name, col_name);

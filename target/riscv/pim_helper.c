@@ -30,58 +30,6 @@
 
 #if !defined(CONFIG_USER_ONLY)
 
-typedef struct DRAM_info {
-    uint32_t channel;
-    uint32_t rank;
-    uint32_t row;
-    uint32_t subarr;
-    uint32_t bank;
-    uint32_t col;
-    hwaddr addr;
-} DRAM_info;
-
-static void dram_el_to_dram_info(dram_element_info *el, uint32_t *info, hwaddr addr)
-{
-    addr &= el->mask;
-    *info = 0;
-    hwaddr temp;
-    for(int i=0; i < el->n_sections; i++) {
-        // if(el->offsets[i] > 0){
-            // temp = addr >> el->offsets[i];
-        // } else {
-            temp = addr << el->offsets[i];
-        // }
-
-        // *info |= temp & ((1 << el->bits[i]) - 1);
-        *info |= temp;
-    }
-}
-
-ATTRIBUTE_UNUSED
-static int phys_to_dram_info(CPURISCVState *env, DRAM_info *info, hwaddr addr)
-{
-    if(addr == -1)
-        return -1;
-
-    info->addr = addr;
-
-    dram_cpu_info *dinfo = &(RISCV_CPU(env_cpu(env))->dram_info);
-
-    dram_el_to_dram_info(&dinfo->col, &info->col, addr);
-    dram_el_to_dram_info(&dinfo->bank, &info->bank, addr);
-    dram_el_to_dram_info(&dinfo->subarr, &info->subarr, addr);
-    dram_el_to_dram_info(&dinfo->row, &info->row, addr);
-    dram_el_to_dram_info(&dinfo->rank, &info->rank, addr);
-    dram_el_to_dram_info(&dinfo->channel, &info->channel, addr);
-
-    return 0;
-}
-
-ATTRIBUTE_UNUSED
-static void print_dram_info(DRAM_info *info){
-    printf("channel: %u\nrank: %u\nsubarr: %u\nrow: %u\nbank: %u\ncol: %u\n", info->channel, info->rank, info->subarr, info->row, info->bank, info->col);
-}
-
 /* An access can cover an arbitrary # of pages, so try to save them all */
 typedef struct RISCVPage {
     void *host_addr;
@@ -181,9 +129,22 @@ static void del_riscv_access(RISCVAccess *access)
     access->pages = NULL;
 }
 
+// it's about the column so don't care about randomization
 static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
 {
-    return phys & (info->row.mask | info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
+    hwaddr sizes = 0;
+    hwaddr tot = get_el_value(&info->bank, phys);
+    sizes = info->bank.size;
+    tot += get_el_value(&info->row, phys) * sizes;
+    sizes *= info->row.size;
+    tot += get_el_value(&info->subarr, phys) * sizes;
+    sizes *= info->subarr.size;
+    tot += get_el_value(&info->rank, phys)* sizes;
+    sizes *= info->rank.size;
+    tot += get_el_value(&info->channel, phys) * sizes;
+    sizes *= info->channel.size;
+
+    return tot;
 }
 
 static hwaddr get_next_row(hwaddr phys, CPURISCVState *env)
@@ -430,29 +391,26 @@ static int n_rcc_missed_src;
 static int rcc_missed_dest[100];
 static int n_rcc_missed_dest;
 
-static hwaddr get_bank_mask(hwaddr phys, dram_cpu_info *info)
-{
-    return phys & (info->bank.mask | info->channel.mask | info->rank.mask);
-}
-
-static hwaddr get_subarray_mask(hwaddr phys, dram_cpu_info *info)
-{
-    return phys & (info->bank.mask | info->channel.mask | info->subarr.mask | info->rank.mask);
-}
-
 static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr start, hwaddr dest, rcc_stats *stat)
 {
     uint64_t delay = 0;
     dram_cpu_info *info =  &(RISCV_CPU(env_cpu(env))->dram_info);
 
-    hwaddr subs = get_subarray_mask(start, info);
-    hwaddr subd = get_subarray_mask(dest, info);
+    hwaddr chans = get_el_value(&info->channel, start);
+    hwaddr ranks = get_el_value(&info->rank, start);
+    hwaddr banks = get_el_value(&info->bank, start);
+    hwaddr subs = get_el_value(&info->subarr, start);
+    hwaddr rows = get_el_value(&info->row, start);
 
-    hwaddr banks = get_bank_mask(start, info);
-    hwaddr bankd = get_bank_mask(dest, info);
+    hwaddr chand = get_el_value(&info->channel, dest);
+    hwaddr rankd = get_el_value(&info->rank, dest);
+    hwaddr bankd = get_el_value(&info->bank, dest);
+    hwaddr subd = get_el_value(&info->subarr, dest);
+    hwaddr rowd = get_el_value(&info->row, dest);
 
-    hwaddr rows = get_row_mask(start, info);
-    hwaddr rowd = get_row_mask(dest, info);
+    bool same_bank = (banks == bankd) && (chans == chand) && (ranks == rankd);
+    bool same_sub = (subs == subd) && same_bank;
+    bool same_row = (rows == rowd) && same_sub;
 
     debug_printf("Subarr src is %lx\n", subs);
     debug_printf("Subarr dest is %lx\n", subd);
@@ -463,26 +421,27 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     debug_printf("Row src is %lx\n", rows);
     debug_printf("Row dest is %lx\n", rowd);
 
-    if(rows == rowd) { // same row, all in CPU
-        printf("Same row, Slowdown CPU\n");
+    if(same_row) { // same row, all in CPU
+        debug_printf("Slowdown CPU, row %lx == row %lx\n", rows, rowd);
         return CPU_DELAY(size);
     }
 
     stat->general.in_pim += size;
 
-    if(banks == bankd) { // same bank
+    if(same_bank) { // same bank
         // if same subarray, FPM
         // if different, PSM * 2
-        if(subs != subd) {
-            debug_printf("Slowdown PSM 2\n");
-            delay = PSM_DELAY(size) * 2;
-            stat->in_psm += size;
-        } else {
+        if(same_sub) {
+            debug_printf("Slowdown FPM\n");
             delay = FPM_DELAY(size);
             stat->in_fpm += size;
+        } else {
+            debug_printf("Slowdown PSM 2, sub %lx != sub %lx\n", subs, subd);
+            delay = PSM_DELAY(size) * 2;
+            stat->in_psm += size;
         }
     } else { // different bank, PSM
-        debug_printf("Slowdown PSM\n");
+        debug_printf("Slowdown PSM, bank %lx != bank %lx\n", banks, bankd);
         delay = PSM_DELAY(size);
         stat->in_psm += size;
     }
@@ -989,7 +948,8 @@ static rci_stats rcik_stat;
 #endif
 
 /* row_dest is the guest virtual address representing the row
- * that we want to memset. */
+ * that we want to memset.
+ */
 void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 {
 #if !defined(CONFIG_USER_ONLY)

@@ -3,10 +3,14 @@
 #define HW_DRAM_H
 
 #define DRAM_MAX_BIT_INTERLEAVING 5
+#define DRAM_MAX_BIT_XOR 3 // MUST be at least 2
 typedef struct dram_element_info {
     uint64_t mask;
     uint8_t bits[DRAM_MAX_BIT_INTERLEAVING];
     int8_t offsets[DRAM_MAX_BIT_INTERLEAVING]; // offset abs to bit 0
+    uint8_t rand_bits[DRAM_MAX_BIT_INTERLEAVING][DRAM_MAX_BIT_XOR + 1];
+    // rand_bits[i][0] = n elements
+    // rand_bits[i][1 - DRAM_MAX_BIT_XOR] = other elements or 0
     uint8_t n_sections;
     uint64_t size;
 } dram_element_info;
@@ -28,33 +32,19 @@ typedef struct dram_cpu_info {
 
 
 
-/*
-    8 banks
-    2^11 column per row
-    2^14 rows
-    1 channel
 
-    Cache row interleaving (cache 64 bytes)
-    [31] 		channel     0x8000 0000
-    [30] 		rank        0x4000 0000
-    [29:24]     subarr      0x3f00 0000
-    [29:15]		row         0x3fff 8000
-    [14:9]		high col    0x0000 7e00
-    [8:6]		bank        0x0000 01c0
-    [5:0]		low col     0x0000 003f
-
-    ROW Interleaving
-    [31] 		channel
-    [30] 		rank
-    [29:24]     subarr
-    [29:15]		row
-    [14:12]		bank
-    [11:0]		col
-*/
+static inline void print_rand_field(int name, int8_t *el)
+{
+    printf("\trand %d [%d]:", name, el[0]);
+    for(int i=1; i <= DRAM_MAX_BIT_XOR; i++){
+        printf("%d-", el[i]);
+    }
+    printf("\n");
+}
 
 static inline void print_field(const char *name, int8_t *el)
 {
-    printf("%s:", name);
+    printf("%s: ", name);
     for(int i=0; i < DRAM_MAX_BIT_INTERLEAVING; i++){
         printf("%d-", el[i]);
     }
@@ -68,6 +58,12 @@ static inline void print_dram_element(const char *name, dram_element_info *el)
     print_field("off", el->offsets);
     printf("mask:%lx ", el->mask);
     printf("size:%ld\n", el->size);
+    for(int i=0; i < DRAM_MAX_BIT_INTERLEAVING; i++) {
+        if(el->rand_bits[i][0] > 0){
+            g_assert(strcmp(name, "col") != 0);
+            print_rand_field(i, (int8_t *) el->rand_bits[i]);
+        }
+    }
 }
 
 static inline void init_default_dram_elements(dram_cpu_info *dram)
@@ -97,11 +93,37 @@ static inline void init_default_dram_elements(dram_cpu_info *dram)
     dram->col.mask = 0x00000fff;
 }
 
+static inline hwaddr get_el_value(dram_element_info *el, hwaddr addr)
+{
+    hwaddr orig = addr;
+    hwaddr info = 0;
+    hwaddr temp = 0;
+
+    addr &= el->mask;
+    for(int i=0; i < el->n_sections; i++) {
+
+        if(el->rand_bits[i][0] > 0){
+            temp = 0;
+            for(int j=1; j <= el->rand_bits[i][0]; j++)
+                temp ^= (orig >> el->rand_bits[i][j]) & 1;
+
+            temp = temp << el->offsets[i];
+        } else {
+            temp = addr >> el->offsets[i];
+        }
+
+        g_assert((info & temp) == 0);
+        info |= temp;
+    }
+
+    return info;
+}
+
 static inline int parse_dram_el_bits(dram_element_info *el)
 {
     char *f, *p, *f1, *f2, *p1, *p2;
     int sf, ef, sp, ep, shift_off;
-    uint32_t new_bits;
+    uint32_t new_bits = 0;
     f = strtok(NULL, "="); /* f1:f2 */
     p = strtok(NULL, "\n"); /* p1:p2 */
 
@@ -112,7 +134,35 @@ static inline int parse_dram_el_bits(dram_element_info *el)
     p1 = strtok(p, ":");
     p2 = strtok(NULL, "\n");
 
+    // printf("f1: %s\n", f1);
+    // printf("f2: %s\n", f2);
+    // printf("p1: %s\n", p1);
+    // printf("p2: %s\n", p2);
+
     sf = atoi(f1);
+
+    if(f1 && !f2 && p1 && !p2){
+        char *xo1 = strtok(p1, "^");
+        char *xo2 = strtok(NULL, "^");
+        if(xo1 && xo2){
+            // all is 0 / invaried
+            new_bits = 1;
+            shift_off = sf;
+            el->rand_bits[sf][1] = atoi(xo1);
+            el->rand_bits[sf][2] = atoi(xo2);
+            int n_el = 2;
+            while(xo2 != NULL && n_el < DRAM_MAX_BIT_XOR) {
+                xo2 = strtok(NULL, "^");
+                if(xo2){
+                    el->rand_bits[sf][n_el+1] = atoi(xo2);
+                    n_el++;
+                }
+            }
+            el->rand_bits[sf][0] = n_el;
+            goto update_values;
+        }
+    }
+
     sp = atoi(p1);
 
     // check that the addresses match
@@ -140,6 +190,7 @@ static inline int parse_dram_el_bits(dram_element_info *el)
         el->mask |= 1l << shift_off;
         // shift_off -= (sf+1);
     }
+update_values:
     el->bits[el->n_sections] = new_bits;
     new_bits = 0;
 
@@ -177,9 +228,9 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
         dram_element_info *el = NULL;
         switch(op[0]) {
             case 'c': {
-                if(op[1] == 'o') // col
+                if(op[1] == 'o'){ // col
                     el = &dram_info->col;
-                else // chan
+                } else // chan
                     el = &dram_info->channel;
                 break;
             }
