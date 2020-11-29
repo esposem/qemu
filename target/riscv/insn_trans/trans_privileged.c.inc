@@ -82,6 +82,40 @@ static bool trans_wfi(DisasContext *ctx, arg_wfi *a)
 #endif
 }
 
+static bool trans_rcik(DisasContext *ctx, arg_rcik *a)
+{
+#ifndef CONFIG_USER_ONLY
+    TCGv dest = tcg_temp_new();
+
+    gen_get_gpr(dest, a->rs1);
+    gen_helper_rcik(cpu_env, dest);
+
+    tcg_temp_free(dest);
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
+{
+#ifndef CONFIG_USER_ONLY
+    TCGv src = tcg_temp_new();
+    TCGv dest = tcg_temp_new();
+
+    gen_get_gpr(src, a->rs1);
+    gen_get_gpr(dest, a->rs2);
+
+    gen_helper_rcck(cpu_env, src, dest);
+
+    tcg_temp_free(src);
+    tcg_temp_free(dest);
+    return true;
+#else
+    return false;
+#endif
+}
+
 static bool trans_sfence_vma(DisasContext *ctx, arg_sfence_vma *a)
 {
 #ifndef CONFIG_USER_ONLY

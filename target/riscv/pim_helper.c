@@ -953,6 +953,11 @@ static rci_stats rcik_stat;
 void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 {
 #if !defined(CONFIG_USER_ONLY)
+
+    if (!(env->priv >= PRV_S)) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+    }
+
     dram_cpu_info *info;
     uint64_t row_size, delay;
     hwaddr offset_row;
@@ -1020,8 +1025,12 @@ static TCGMemOpIdx rcck_oi;
 
 void helper_rcck(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
-
 #if !defined(CONFIG_USER_ONLY)
+
+    if (!(env->priv >= PRV_S)) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+    }
+
     dram_cpu_info *info;
     uint64_t delay_op = 0;
     hwaddr row_size;
