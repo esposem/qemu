@@ -502,9 +502,9 @@ static void rec_iteration(int level, char **row, hwaddr phys, void *host,dram_cp
 
 
 
-static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
-                          hwaddr phys_src, void *host_src,
-                          dram_cpu_info *info, uint64_t *size)
+static void rec_rr_iteration(int level, void *host_dest, void *host_src,
+                          dram_cpu_info *info, uint64_t *size,
+                          void (*fn)(void *dest, void *src, uint64_t sz))
 {
     uint64_t host_64, j;
 
@@ -515,10 +515,52 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
         }
 
         if (level != 1) {
-            rec_rr_iteration(level-1, phys_dest, host_dest, phys_src, host_src, info, size);
+            rec_rr_iteration(level-1, host_dest, host_src, info, size, fn);
             host_64 = (uint64_t) host_src;
             host_src = (void *) get_next_address(host_64, level-1, info);
-            phys_src = get_next_address(phys_src, level-1, info);
+
+            host_64 = (uint64_t) host_dest;
+            host_dest = (void *) get_next_address(host_64, level-1, info);
+            continue;
+        }
+
+        uint64_t sz = MIN(info->part_row_end + 1, *size);
+        fn(host_dest, host_src, sz);
+        *size -= sz;
+
+        host_64 = (uint64_t) host_src;
+        host_src = (void *) get_next_address(host_64, 0, info);
+
+        host_64 = (uint64_t) host_dest;
+        host_dest = (void *) get_next_address(host_64, 0, info);
+    }
+
+}
+
+static void rec_rrr_iteration(int level, hwaddr phys_dest, void *host_dest,
+                          hwaddr phys_src1, void *host_src1,
+                          hwaddr phys_src2, void *host_src2,
+                          dram_cpu_info *info, uint64_t *size,
+                          void (*fn)(void *dest, void *src1, void *src2, uint64_t sz))
+{
+    uint64_t host_64, j;
+
+    for(j=0; j < (1 << info->col.bits[level]); j++){
+
+        if(*size == 0) {
+            return;
+        }
+
+        if (level != 1) {
+            rec_rrr_iteration(level-1, phys_dest, host_dest, phys_src1, host_src1, phys_src2, host_src2, info, size, fn);
+
+            host_64 = (uint64_t) host_src1;
+            host_src1 = (void *) get_next_address(host_64, level-1, info);
+            phys_src1 = get_next_address(phys_src1, level-1, info);
+
+            host_64 = (uint64_t) host_src2;
+            host_src2 = (void *) get_next_address(host_64, level-1, info);
+            phys_src2 = get_next_address(phys_src2, level-1, info);
 
             host_64 = (uint64_t) host_dest;
             host_dest = (void *) get_next_address(host_64, level-1, info);
@@ -527,13 +569,17 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
         }
 
         uint64_t sz = MIN(info->part_row_end + 1, *size);
-        memcpy(host_dest, host_src, sz);
+        fn(host_dest, host_src1, host_src2, sz);
         // printf("copying from %lx till %lx sz %lu\n", phys_src,  phys_src + sz, sz);
         *size -= sz;
 
-        host_64 = (uint64_t) host_src;
-        host_src = (void *) get_next_address(host_64, 0, info);
-        phys_src = get_next_address(phys_src, 0, info);
+        host_64 = (uint64_t) host_src1;
+        host_src1 = (void *) get_next_address(host_64, 0, info);
+        phys_src1 = get_next_address(phys_src1, 0, info);
+
+        host_64 = (uint64_t) host_src2;
+        host_src2 = (void *) get_next_address(host_64, 0, info);
+        phys_src2 = get_next_address(phys_src2, 0, info);
 
         host_64 = (uint64_t) host_dest;
         host_dest = (void *) get_next_address(host_64, 0, info);
@@ -541,6 +587,7 @@ static void rec_rr_iteration(int level, hwaddr phys_dest, void *host_dest,
     }
 
 }
+
 
 static char *from_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *info, uint64_t size)
 {
@@ -571,9 +618,58 @@ static void set_to_row(char *src_buff, hwaddr phys, void *host, dram_cpu_info *i
     from_row(src_buff, phys, host, info, size);
 }
 
+static void r_cp(void *dest, void *src, uint64_t sz)
+{
+    memcpy(dest, src, sz);
+}
+
 static void row_memcpy(hwaddr src_phys, void *src_host, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
 {
-    rec_rr_iteration(DRAM_MAX_BIT_INTERLEAVING-1, dest_phys, dest_host, src_phys, src_host, info, &size);
+    rec_rr_iteration(DRAM_MAX_BIT_INTERLEAVING-1, dest_host, src_host, info, &size, r_cp);
+}
+
+static void r_not(void *dest, void *src, uint64_t sz)
+{
+    char *s = (char *)src;
+    char *d = (char *)dest;
+
+    for(int i=0; i < sz; i++)
+        *d = ~(*s);
+}
+
+static void row_not(hwaddr src_phys, void *src_host, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
+{
+    rec_rr_iteration(DRAM_MAX_BIT_INTERLEAVING-1, dest_host, src_host, info, &size, r_not);
+}
+
+static void r_and(void *dest, void *src1, void *src2, uint64_t sz)
+{
+    char *s1 = (char *)src1;
+    char *s2 = (char *)src2;
+    char *d = (char *)dest;
+
+    for(int i=0; i < sz; i++)
+        *d = (*s1) & (*s2);
+}
+
+static void row_and(hwaddr src_phys1, void *src_host1, hwaddr src_phys2, void *src_host2, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
+{
+    rec_rrr_iteration(DRAM_MAX_BIT_INTERLEAVING-1, dest_phys, dest_host, src_phys1, src_host1, src_phys2, src_host2, info, &size, r_and);
+}
+
+static void r_or(void *dest, void *src1, void *src2, uint64_t sz)
+{
+    char *s1 = (char *)src1;
+    char *s2 = (char *)src2;
+    char *d = (char *)dest;
+
+    for(int i=0; i < sz; i++)
+        *d = (*s1) | (*s2);
+}
+
+static void row_or(hwaddr src_phys1, void *src_host1, hwaddr src_phys2, void *src_host2, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
+{
+    rec_rrr_iteration(DRAM_MAX_BIT_INTERLEAVING-1, dest_phys, dest_host, src_phys1, src_host1, src_phys2, src_host2, info, &size, r_or);
 }
 
 static uint64_t get_increment_row_address(uint64_t increment, dram_cpu_info *info)
@@ -1011,7 +1107,6 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
     del_riscv_access(&rcik_access);
 #endif
 }
-
 
 #if !defined(CONFIG_USER_ONLY)
 
