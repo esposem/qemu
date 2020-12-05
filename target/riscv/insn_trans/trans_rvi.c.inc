@@ -166,29 +166,6 @@ static bool trans_lw(DisasContext *ctx, arg_lw *a)
     return gen_load(ctx, a, MO_TESL);
 }
 
-static bool trans_bbop(DisasContext *ctx, arg_bbop *a)
-{
-    printf("bbop src1:%d src2:%d size:%d dest:%d\n", a->rs1, a->rs2, a->rs3, a->rd);
-
-    TCGv src1 = tcg_temp_new();
-    TCGv src2 = tcg_temp_new();
-    TCGv size = tcg_temp_new();
-    TCGv dest = tcg_temp_new();
-
-    gen_get_gpr(src1, a->rs1);
-    gen_get_gpr(src2, a->rs2);
-    gen_get_gpr(size, a->rs3);
-    gen_get_gpr(dest, a->rd);
-
-    gen_helper_bbop(cpu_env, src1, src2, dest, size);
-
-    tcg_temp_free(src1);
-    tcg_temp_free(src2);
-    tcg_temp_free(size);
-    tcg_temp_free(dest);
-    return true;
-}
-
 static bool gen_rcc(DisasContext *ctx, arg_rcc *a)
 {
     // printf("rcc src:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rd);
@@ -251,28 +228,18 @@ static bool trans_stat(DisasContext *ctx, arg_stat *a)
     return true;
 }
 
-static bool trans_stat_c(DisasContext *ctx, arg_stat_c *a)
+static bool trans_incr_cpu(DisasContext *ctx, arg_incr_cpu *a)
 {
     TCGv size = tcg_temp_new();
+    TCGv op = tcg_temp_new();
 
     gen_get_gpr(size, a->rs2);
+    gen_get_gpr(op, a->rs1);
 
-    gen_helper_stat_c(size);
-
-    tcg_temp_free(size);
-
-    return true;
-}
-
-static bool trans_stat_i(DisasContext *ctx, arg_stat_i *a)
-{
-    TCGv size = tcg_temp_new();
-
-    gen_get_gpr(size, a->rs2);
-
-    gen_helper_stat_i(size);
+    gen_helper_incr_cpu(size, op);
 
     tcg_temp_free(size);
+    tcg_temp_free(op);
 
     return true;
 }

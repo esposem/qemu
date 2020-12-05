@@ -97,7 +97,7 @@ static bool trans_rcik(DisasContext *ctx, arg_rcik *a)
 #endif
 }
 
-static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
+static bool gen_src_dest(DisasContext *ctx, arg_rcck *a, bool rcck)
 {
 #ifndef CONFIG_USER_ONLY
     TCGv src = tcg_temp_new();
@@ -106,7 +106,10 @@ static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
     gen_get_gpr(src, a->rs1);
     gen_get_gpr(dest, a->rs2);
 
-    gen_helper_rcck(cpu_env, src, dest);
+    if(rcck)
+        gen_helper_rcck(cpu_env, src, dest);
+    else
+        gen_helper_anot(cpu_env, src, dest);
 
     tcg_temp_free(src);
     tcg_temp_free(dest);
@@ -114,6 +117,51 @@ static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
 #else
     return false;
 #endif
+}
+
+static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
+{
+    return gen_src_dest(ctx, a, true);
+}
+
+static bool trans_anot(DisasContext *ctx, arg_rcck *a)
+{
+    return gen_src_dest(ctx, a, false);
+}
+
+static bool gen_ambit(DisasContext *ctx, arg_aor *a, bool or)
+{
+#ifndef CONFIG_USER_ONLY
+    TCGv src1 = tcg_temp_new();
+    TCGv src2 = tcg_temp_new();
+    TCGv dest = tcg_temp_new();
+
+    gen_get_gpr(src1, a->rs2);
+    gen_get_gpr(src2, a->rs1);
+    gen_get_gpr(dest, a->rd);
+
+    if(or)
+        gen_helper_aor(cpu_env, src1, src2, dest);
+    else
+        gen_helper_aand(cpu_env, src1, src2, dest);
+
+    tcg_temp_free(src1);
+    tcg_temp_free(src2);
+    tcg_temp_free(dest);
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool trans_aor(DisasContext *ctx, arg_aor *a)
+{
+    return gen_ambit(ctx, a, true);
+}
+
+static bool trans_aand(DisasContext *ctx, arg_aand *a)
+{
+    return gen_ambit(ctx, a, false);
 }
 
 static bool trans_sfence_vma(DisasContext *ctx, arg_sfence_vma *a)
