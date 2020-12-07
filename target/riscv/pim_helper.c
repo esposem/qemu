@@ -744,7 +744,7 @@ static void r_not(void *dest, void *src, uint64_t sz)
     char *d = (char *)dest;
 
     for(int i=0; i < sz; i++)
-        *d = ~(*s);
+        d[i] = ~(s[i]);
 }
 
 static void row_not(hwaddr src_phys, void *src_host, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
@@ -760,8 +760,11 @@ static void r_and(void *dest, void *src1, void *src2, uint64_t sz)
     char *s2 = (char *)src2;
     char *d = (char *)dest;
 
-    for(int i=0; i < sz; i++)
-        *d = (*s1) & (*s2);
+    for(int i=0; i < sz; i++){
+        // if(i == 0)
+        //     printf("%x & %x = %x\n", s1[i], s2[i], (s1[i]) & (s2[i]));
+        d[i] = s1[i] & s2[i];
+    }
 }
 
 static void row_and(hwaddr src_phys1, void *src_host1, hwaddr src_phys2, void *src_host2, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
@@ -775,8 +778,11 @@ static void r_or(void *dest, void *src1, void *src2, uint64_t sz)
     char *s2 = (char *)src2;
     char *d = (char *)dest;
 
-    for(int i=0; i < sz; i++)
-        *d = (*s1) | (*s2);
+    for(int i=0; i < sz; i++){
+        // if(i == 0)
+        //     printf("%x | %x = %x\n", s1[i], s2[i], (s1[i]) | (s2[i]));
+        d[i] = s1[i] | s2[i];
+    }
 }
 
 static void row_or(hwaddr src_phys1, void *src_host1, hwaddr src_phys2, void *src_host2, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
@@ -1331,9 +1337,10 @@ void helper_rcck(CPURISCVState *env, target_ulong src, target_ulong dest)
 #endif
 }
 
-void helper_anot(CPURISCVState *env, target_ulong src, target_ulong dest) 
+void helper_anot(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
+    // printf("helper_anot\n");
     helper_src_dest(env, src, dest, GETPC(), row_not);
 #endif
 }
@@ -1406,9 +1413,10 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
     offset_src1 = phys_src1 & info->col.mask;
     offset_src2 = phys_src2 & info->col.mask;
     offset_dest = phys_dest & info->col.mask;
-    g_assert(offset_src1 == 0);
-    g_assert(offset_src2 == 0);
-    g_assert(offset_dest == 0);
+
+    if (offset_src1 != 0 || offset_src2 != 0 || offset_dest != 0) {
+        riscv_raise_exception(env, RISCV_EXCP_INST_ACCESS_FAULT, curr_pc);
+    }
 
     /* Core operation, perform the actual copy */
     row_fn(phys_src1,
@@ -1428,7 +1436,7 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
     ambit_stat.general.del_val[ambit_stat.general.avg_delay.n] = delay_op;
 #endif
     ambit_stat.general.avg_delay.n++;
-    ambit_stat.general.avg_pf.sum -= 2;
+    ambit_stat.general.avg_pf.sum -= 3;
     ambit_stat.general.avg_pf.n++;
 
     del_riscv_access(&ambit_src1_access);

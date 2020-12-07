@@ -3,7 +3,7 @@
 #define HW_DRAM_H
 
 #define DRAM_MAX_BIT_INTERLEAVING 5
-#define DRAM_MAX_BIT_XOR 3 // MUST be at least 2
+#define DRAM_MAX_BIT_XOR 4 // MUST be at least 2
 typedef struct dram_element_info {
     uint64_t mask;
     uint8_t bits[DRAM_MAX_BIT_INTERLEAVING];
@@ -98,6 +98,7 @@ static inline hwaddr get_el_value(dram_element_info *el, hwaddr addr)
     hwaddr orig = addr;
     hwaddr info = 0;
     hwaddr temp = 0;
+    hwaddr proc = 0;
 
     addr &= el->mask;
     for(int i=0; i < el->n_sections; i++) {
@@ -106,14 +107,22 @@ static inline hwaddr get_el_value(dram_element_info *el, hwaddr addr)
             temp = 0;
             for(int j=1; j <= el->rand_bits[i][0]; j++)
                 temp ^= (orig >> el->rand_bits[i][j]) & 1;
-
             temp = temp << el->offsets[i];
         } else {
-            temp = addr >> el->offsets[i];
+            if(el->offsets[i] >= 0)
+                temp = (addr >> el->offsets[i]);
+            else{
+                printf("Not supported yet\n");
+                g_assert(false);
+                temp = (addr << el->offsets[i]);
+            }
+
+            temp &= (((1 << el->bits[i]) -1) << proc);
         }
 
         g_assert((info & temp) == 0);
         info |= temp;
+        proc += el->bits[i];
     }
 
     return info;
@@ -148,17 +157,17 @@ static inline int parse_dram_el_bits(dram_element_info *el)
             // all is 0 / invaried
             new_bits = 1;
             shift_off = sf;
-            el->rand_bits[sf][1] = atoi(xo1);
-            el->rand_bits[sf][2] = atoi(xo2);
+            el->rand_bits[el->n_sections][1] = atoi(xo1);
+            el->rand_bits[el->n_sections][2] = atoi(xo2);
             int n_el = 2;
             while(xo2 != NULL && n_el < DRAM_MAX_BIT_XOR) {
                 xo2 = strtok(NULL, "^");
                 if(xo2){
-                    el->rand_bits[sf][n_el+1] = atoi(xo2);
+                    el->rand_bits[el->n_sections][n_el+1] = atoi(xo2);
                     n_el++;
                 }
             }
-            el->rand_bits[sf][0] = n_el;
+            el->rand_bits[el->n_sections][0] = n_el;
             goto update_values;
         }
     }
@@ -183,11 +192,12 @@ static inline int parse_dram_el_bits(dram_element_info *el)
 
         el->mask |= ((1 << new_bits) - 1) << shift_off;
 
-        // shift_off -= MIN(sf, ef);
+        shift_off -= MIN(sf, ef);
     } else {
         new_bits = 1;
         shift_off = sp;
         el->mask |= 1l << shift_off;
+        shift_off -= sf;
         // shift_off -= (sf+1);
     }
 update_values:
@@ -202,6 +212,18 @@ update_values:
     el->size = (1 << new_bits);
 
     return 0;
+}
+
+static inline void check_mapping(const char *name, dram_element_info *el, hwaddr addr)
+{
+
+    printf("Checking %s...", name);
+    hwaddr val = get_el_value(el, addr);
+    if(val != (el->size-1)){
+        printf("\tVal %lx does not match with exp %lx\n", val, (el->size-1));
+    }
+    g_assert(val == (el->size-1));
+    printf("OK\n");
 }
 
 static inline void read_dram_info_file(dram_cpu_info *dram_info)
@@ -278,6 +300,13 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
     printf("addr %lx sz %lx\n", dram_info->offset, dram_info->size);
     printf("---------------------\n");
 
+    uint64_t val = 0xffffffffffffffff;
+    check_mapping("col", &dram_info->col, val);
+    check_mapping("bank", &dram_info->bank, val);
+    check_mapping("row", &dram_info->row, val);
+    check_mapping("subarr", &dram_info->subarr, val);
+    check_mapping("rank", &dram_info->rank, val);
+    check_mapping("channel", &dram_info->channel, val);
 }
 
 #endif
