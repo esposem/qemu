@@ -1,0 +1,219 @@
+# comments starting with # and blank lines are ignored.
+
+# The index of the least significant bit is 0.
+
+# Keywords
+# Please use the following bigrams of each level:
+# Channel:      chan
+# Rank:         rank
+# Bank:         bank
+# Subarray:     subarr
+# Row:          row
+# Column:       col
+
+# Bit assignments
+# bank 2 = 13 --means--> BankAddress[2] := PhysicalAddress[13]
+
+# Array assignments
+# bank  2:0 = 5:3 --means--> BankAddress[2:0] := PhysicalAddress[5:3]
+
+# if multiple fields have the same name, THEY MUST be ordered
+# by their relative index. For example:
+# col 2:0 = X:Y
+# col 15:10 = W:Z
+# is better than
+# col 15:10 = W:Z
+# col 2:0 = X:Y
+
+# Randomization
+# Zhang et al. proposed an XOR based bank randomization to reduce the row
+# buffer conflicts. [1]  To enable it in QEMU, you can specify which bits to
+# xor and assign to where.
+# This technique can be applied to any BUT the column!
+
+# bank 0 = 0^13 --means-->
+# BankAddress[0] := PhysicalAddress[0] xor PhysicalAddress[13]
+
+# bank 1 = 1^7^15 --means-->
+# BankAddress[0] := PhysicalAddress[1] xor
+#                   PhysicalAddress[7] xor PhysicalAddress[15]
+
+
+############################
+# Examples
+############################
+
+# Standard DDR3, row interleaving, 8 banks, 32k rows per bank,
+# 64 subarr per bank, each row is 4K
+# Size               8 GB
+# Number of bits     32
+# Channel             1
+# Rank                1
+# Bank                3
+# Row                15
+# Subarray            6 (subset of row)
+# Column             12
+
+# col     11:0 = 11:0
+# bank    2:0 = 14:12
+# row     15:0 = 30:15
+# subarr  6:0 = 30:24
+# rank    0 = 31
+# chan    0 = 32
+
+
+# Standard DDR3, cache line (64b) interleaving, 8 banks, 32k rows per bank,
+# 64 subarr per bank, each row is 4K
+# Size               8 GB
+# Number of bits     32
+# Channel             1
+# Rank                1
+# Bank                3
+# Row                15
+# Subarray            6 (subset of row)
+# Column             12
+
+# col     5:0 = 5:0
+# col     11:6 = 14:9
+# bank    2:0 = 8:6
+# row     15:0 = 30:15
+# subarr  6:0 = 30:24
+# rank    0 = 31
+# chan    0 = 32
+
+# case where a HP maps to a single subarr only
+# needs MMAP
+# col     11:0 = 11:0
+# row     15:0 = 27:12
+# subarr  6:0 = 27:21
+# bank    2:0 = 30:28
+# rank    0 = 31
+# chan    0 = 32
+
+##########################################
+
+# 8k row, less n row and subarrays
+# col     12:0 = 12:0
+# bank    2:0 = 15:13
+# row     14:0 = 30:16
+# subarr  5:0 = 30:25
+# rank    0 = 31
+# chan    0 = 32
+
+# col     5:0 = 5:0
+# col     12:6 = 15:9
+# bank    2:0 = 8:6
+# row     14:0 = 30:16
+# subarr  5:0 = 30:25
+# rank    0 = 31
+# chan    0 = 32
+
+# case where a HP maps to a single subarr only
+# needs MMAP
+# col     12:0 = 12:0
+# row     14:0 = 27:13
+# subarr  6:0 = 27:21
+# bank    2:0 = 30:28
+# rank    0 = 31
+# chan    0 = 32
+
+
+# 2k row, more n row and subarrays
+# col     10:0 = 10:0
+# bank    2:0 = 13:11
+# row     16:0 = 30:14
+# subarr  7:0 = 30:23
+# rank    0 = 31
+# chan    0 = 32
+
+# col     5:0 = 5:0
+# col     10:6 = 13:9
+# bank    2:0 = 8:6
+# row     16:0 = 30:14
+# subarr  7:0 = 30:23
+# rank    0 = 31
+# chan    0 = 32
+
+# case where a HP maps to a single subarr only
+# needs MMAP
+# col     10:0 = 10:0
+# row     16:0 = 27:11
+# subarr  6:0 = 27:21
+# bank    2:0 = 30:28
+# rank    0 = 31
+# chan    0 = 32
+
+# CPU addressing offset and size given to the DRAM.
+# reg <address> <size>
+# both address and size MUST be in hex!
+# Basically means that CPU addresses from <address> till
+# <address + size> will reach the DRAM device
+reg  80000000 200000000
+
+# Used row mapping
+col     5:0 = 5:0
+col     12:6 = 15:9
+bank    2:0 = 8:6
+row     14:0 = 30:16
+subarr  5:0 = 30:25
+rank    0 = 31
+chan    0 = 32
+
+# bank xor 2K
+# col     11:0 = 11:0
+# bank    0 = 16^23
+# bank    1 = 17^22
+# bank    2 = 18^21
+# row     15:0 = 27:12
+# subarr  6:0 = 27:21
+# rank    0 = 28
+# chan    0 = 29
+
+
+# test randomization
+# col     11:0 = 11:0
+# bank    2:0 = 14:12
+# row     15:0 = 30:15
+# subarr  6:0 = 30:24
+# rank    0 = 31
+# rank    1 = 2^3
+# rank    2 = 22
+# rank    3 = 4^9
+# rank    4 = 11^7^23
+# chan    0 = 32
+
+# test interleaving
+# col     5:0 = 5:0
+# bank    0 = 6
+# col     7:6 = 8:7
+# bank    1 = 9
+# col     9:8 = 11:10
+# bank    2 = 12
+# col     10 = 13
+# row     16:0 = 30:14
+# subarr  7:0 = 30:23
+# rank    0 = 31
+# chan    0 = 32
+
+# Test xor and also worst case (pim area doesnt work)
+# col     5:0 = 5:0
+# col     11:6 = 14:9
+# row     2:0 = 8:6
+# row     15:3 = 27:15
+# subarr  0 = 6^8^16
+# subarr  6:1 = 27:22
+# bank    2:0 = 30:28
+# rank    0 = 31
+# chan    0 = 32
+
+# even crazier test
+# col     5:0 = 5:0
+# col     11:6 = 14:9
+# row     2:0 = 8:6
+# row     15:3 = 27:15
+# subarr  2:0 = 24:22
+# subarr  3 = 6^8^16
+# subarr  6:4 = 27:25
+# bank    2:0 = 30:28
+# rank    0 = 31
+# chan    0 = 32
