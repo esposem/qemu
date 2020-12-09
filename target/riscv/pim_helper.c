@@ -110,6 +110,23 @@ static inline void slow_down_by(CPURISCVState *env, size_t delay)
 #endif
 }
 
+
+static uint64_t get_msb(hwaddr n)
+{
+    if(n == 0)
+        return 0;
+
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n |= n >> 32;
+    n = n + 1;
+    return n;
+    // return (n >> 1);
+}
+
 static void init_riscv_access(RISCVAccess *access, target_ulong src, target_ulong size)
 {
     uint64_t n_pages;
@@ -1189,17 +1206,17 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
     uint64_t row_size, delay;
     hwaddr offset_row;
 
+    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+
     /* Only init once */
     if(rcik_access.pages == NULL) {
         // printf("RCIK request\n");
         rcik_mmu_idx = cpu_mmu_index(env, false);
         rcik_oi = make_memop_idx(MO_UB, rcik_mmu_idx);
-        init_riscv_access(&rcik_access, row_dest, 1);
+        init_riscv_access(&rcik_access, row_dest, get_msb(info->col.mask));
     }
 
-    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
     row_size = info->col.size;
-
     init_zero_row(row_size);
 
     /* Page fault if needed, but find all pages. Code until here
@@ -1267,11 +1284,11 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
         rcck_mmu_idx = cpu_mmu_index(env, false);
         rcck_oi = make_memop_idx(MO_UB, rcck_mmu_idx);
 
-        init_riscv_access(&rcck_src_access, src, 1);
-        init_riscv_access(&rcck_dest_access, dest, 1);
+        init_riscv_access(&rcck_src_access, src, get_msb(info->col.mask));
+        init_riscv_access(&rcck_dest_access, dest, get_msb(info->col.mask));
 
-        rcck_src_access.size = 1;
-        rcck_dest_access.size = 1;
+        // rcck_src_access.size = 1;
+        // rcck_dest_access.size = 1;
     }
 
     /* Page fault if needed, but find all pages. Code until here
@@ -1371,13 +1388,13 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
         ambit_mmu_idx = cpu_mmu_index(env, false);
         ambit_oi = make_memop_idx(MO_UB, ambit_mmu_idx);
 
-        init_riscv_access(&ambit_src1_access, src1, 1);
-        init_riscv_access(&ambit_src2_access, src2, 1);
-        init_riscv_access(&ambit_dest_access, dest, 1);
+        init_riscv_access(&ambit_src1_access, src1, get_msb(info->col.mask));
+        init_riscv_access(&ambit_src2_access, src2, get_msb(info->col.mask));
+        init_riscv_access(&ambit_dest_access, dest, get_msb(info->col.mask));
 
-        ambit_src1_access.size = 1;
-        ambit_src2_access.size = 1;
-        ambit_dest_access.size = 1;
+        // ambit_src1_access.size = 1;
+        // ambit_src2_access.size = 1;
+        // ambit_dest_access.size = 1;
     }
 
     /* Page fault if needed, but find all pages. Code until here
