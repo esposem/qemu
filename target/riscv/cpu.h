@@ -27,7 +27,6 @@
 #include "qom/object.h"
 #include "hw/dram.h"
 
-
 #define TCG_GUEST_DEFAULT_MO 0
 
 #define TYPE_RISCV_CPU "riscv-cpu"
@@ -102,6 +101,47 @@ FIELD(VTYPE, VSEW, 2, 3)
 FIELD(VTYPE, VEDIV, 5, 2)
 FIELD(VTYPE, RESERVED, 7, sizeof(target_ulong) * 8 - 9)
 FIELD(VTYPE, VILL, sizeof(target_ulong) * 8 - 1, 1)
+
+/* An access can cover an arbitrary # of pages, so try to save them all */
+typedef struct RISCVPage {
+    void *host_addr;
+    target_ulong v_addr;
+    hwaddr phys_addr;
+    target_ulong size;
+} RISCVPage;
+
+typedef struct RISCVAccess {
+    RISCVPage *pages;    // pages touched by request
+    target_ulong n_pages;
+    target_ulong max_pages;
+    target_ulong vaddr; // request vaddr
+    target_ulong size; // request size
+} RISCVAccess;
+
+typedef struct avg_t {
+    uint64_t sum;
+    int n;
+} avg_t;
+
+#define STAT_MAX_DEL_VAL 10000
+#define USE_STDEV_STDERR 0
+
+typedef struct rci_stats {
+    avg_t avg_pf;
+    avg_t avg_delay;
+#if USE_STDEV_STDERR
+    uint64_t del_val[STAT_MAX_DEL_VAL];
+#endif
+    uint64_t tot_bytes;
+    uint64_t in_pim;
+    uint64_t other;
+} rci_stats;
+
+typedef struct rcc_stats {
+    rci_stats general;
+    uint64_t in_fpm;
+    uint64_t in_psm;
+} rcc_stats;
 
 struct CPURISCVState {
     target_ulong gpr[32];
@@ -233,8 +273,24 @@ struct CPURISCVState {
 
     QEMUTimer *op_timer;
     QemuMutex op_mutex;
-    // int pages_in_row;
     uint64_t lsb_nocol;
+    uint32_t found_index;
+    target_ulong found_size;
+    target_ulong found_addr;
+    RISCVAccess rc_src_access;
+    RISCVAccess rc_src2_access;
+    RISCVAccess rc_dest_access;
+    int rc_mmu_idx;
+    bool rc_faulted_all_src;
+    bool rc_faulted_all_src2;
+    bool rc_faulted_all_dest;
+    uint32_t rc_oi;
+    rcc_stats rcc_stat;
+    rci_stats rci_stat;
+    rci_stats rcik_stat;
+    rcc_stats rcck_stat;
+    rcc_stats ambit_stat;
+
 
     /* Fields from here on are preserved across CPU reset. */
     QEMUTimer *timer; /* Internal timer */

@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/atomic.h"
 #include "cpu.h"
 #include "qemu/host-utils.h"
 #include "exec/exec-all.h"
@@ -15,7 +16,6 @@
 #define CACHE_LINE_SIZE 64
 
 #define DRAM_DEBUG 0
-#define USE_STDEV_STDERR 0
 
 #if DRAM_DEBUG
 #define  debug_printf(fmt, ...)  do { printf(fmt, ## __VA_ARGS__); }while(0);
@@ -30,21 +30,6 @@
 #define AMBIT_DELAY(size) 0
 
 #if !defined(CONFIG_USER_ONLY)
-
-/* An access can cover an arbitrary # of pages, so try to save them all */
-typedef struct RISCVPage {
-    void *host_addr;
-    target_ulong v_addr;
-    hwaddr phys_addr;
-    target_ulong size;
-} RISCVPage;
-
-typedef struct RISCVAccess {
-    RISCVPage *pages;    // pages touched by request
-    target_ulong n_pages;
-    target_ulong vaddr; // request vaddr
-    target_ulong size; // request size
-} RISCVAccess;
 
 struct row_data;
 
@@ -70,29 +55,6 @@ typedef struct row_data {
 } row_data;
 
 typedef QSIMPLEQ_HEAD(, row_data) row_data_list;
-
-typedef struct avg_t {
-    uint64_t sum;
-    int n;
-} avg_t;
-
-#define STAT_MAX_DEL_VAL 10000
-typedef struct rci_stats {
-    avg_t avg_pf;
-    avg_t avg_delay;
-#if USE_STDEV_STDERR
-    uint64_t del_val[STAT_MAX_DEL_VAL];
-#endif
-    uint64_t tot_bytes;
-    uint64_t in_pim;
-    uint64_t other;
-} rci_stats;
-
-typedef struct rcc_stats {
-    rci_stats general;
-    uint64_t in_fpm;
-    uint64_t in_psm;
-} rcc_stats;
 
 static char *zero_row;
 
@@ -133,10 +95,12 @@ static void init_riscv_access(RISCVAccess *access, target_ulong src, target_ulon
 
     n_pages = (size / TARGET_PAGE_SIZE) + 1;
     access->n_pages = n_pages;
+    access->max_pages = MAX(n_pages, access->max_pages);
     access->vaddr = src;
     access->size = size;
     /* multiply by 2 because it can cross page boundary */
-    access->pages = malloc(sizeof(RISCVPage) * n_pages * 2);
+    if(access->max_pages == n_pages)
+        access->pages = realloc(access->pages, sizeof(RISCVPage) * n_pages * 2);
     g_assert(access->pages);
 }
 
@@ -144,8 +108,7 @@ static void del_riscv_access(RISCVAccess *access)
 {
     access->n_pages = 0;
     access->vaddr = 0;
-    free(access->pages);
-    access->pages = NULL;
+    access->size = 0;
 }
 
 // it's about the column so don't care about randomization
@@ -175,11 +138,10 @@ static hwaddr get_next_row(hwaddr phys, CPURISCVState *env)
 
 /* Oneday: this might be the same as done in LKM, so that is faster
  * But no need to do it now, it's just a safety check */
-static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
+static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
                         RISCVAccess *access, row_data_list *row_list,
-                        partial_row_list *partial_list, int *missed)
+                        partial_row_list *partial_list)
 {
-    int missed_i = 0;
     GHashTable *row_table;
     hwaddr start, next, end, nocol;
     uint64_t size_used;
@@ -195,8 +157,8 @@ static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
     for (int i=0; i < access->n_pages; i++) {
 
         if (unlikely(!access->pages[i].host_addr)) {
-            debug_printf("MISSED PAGE %d?\n", i);
-            missed[missed_i++] = i;
+            printf("MISSED PAGE %d?\n", i);
+            // missed[missed_i++] = i;
             continue;
         }
 
@@ -256,7 +218,6 @@ static int init_rowlist(CPURISCVState *env, dram_cpu_info *info,
 
     g_hash_table_destroy(row_table);
     debug_printf("######################\n");
-    return missed_i;
 }
 
 static void del_rowlist(row_data_list *list)
@@ -331,10 +292,6 @@ static void *virt_to_host(CPURISCVState *env, target_ulong addr,
     return ret;
 }
 
-static uint32_t found_index = 0;
-static target_ulong found_size = 0;
-static target_ulong found_addr = 0;
-
 static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
                                 int access_type, dram_cpu_info *info,
                                 int mmu_idx, TCGMemOpIdx oi, uintptr_t ra)
@@ -342,15 +299,15 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
     target_ulong sz;
     RISCVPage *page;
 
-    if(found_size == 0) {
-        found_size = access->size;
-        debug_printf("Size is %lu\n", (uint64_t) found_size);
-        found_addr = access->vaddr;
+    if(env->found_size == 0) {
+        env->found_size = access->size;
+        debug_printf("Size is %lu\n", (uint64_t) env->found_size);
+        env->found_addr = access->vaddr;
     }
 
-    while (found_size > 0) {
+    while (env->found_size > 0) {
         /* size that fits inside a page (taking into account offset) */
-        sz = MIN(found_size, -(found_addr | TARGET_PAGE_MASK));
+        sz = MIN(env->found_size, -(env->found_addr | TARGET_PAGE_MASK));
 
         /*
          * tlb_vaddr_to_host: tries to see in the TLB the hw address
@@ -358,32 +315,32 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
          * It's a trapless lookup, so it might return NULL if it's not
          * found.
          */
-        page = &access->pages[found_index];
-        page->v_addr = found_addr;
+        page = &access->pages[env->found_index];
+        page->v_addr = env->found_addr;
         page->size = sz;
 
-        page->host_addr = virt_to_host(env, found_addr, access_type, info,
+        page->host_addr = virt_to_host(env, env->found_addr, access_type, info,
                                        mmu_idx, oi, ra);
 
         // handle physical page now
-        page->phys_addr = virt_to_phys(env, info, found_addr);
+        page->phys_addr = virt_to_phys(env, info, env->found_addr);
 
-        debug_printf("Page %d\nHost %lx\nPhys %lx\nVirt %lx\nSize %lu\n-----\n", found_index, (uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr, (uint64_t) page->size);
+        debug_printf("Page %d\nHost %lx\nPhys %lx\nVirt %lx\nSize %lu\n-----\n", env->found_index, (uint64_t) page->host_addr, page->phys_addr, (uint64_t)page->v_addr, (uint64_t) page->size);
 
-        found_index++;
-        found_size -= sz;
-        found_addr += sz;
+        env->found_index++;
+        env->found_size -= sz;
+        env->found_addr += sz;
 
-        g_assert(found_index <= (access->n_pages * 2));
+        g_assert(env->found_index <= (access->n_pages * 2));
     }
 
     debug_printf("################\n");
 
-    g_assert(found_size == 0);
-    access->n_pages = found_index;
-    found_index = 0;
-    found_size = 0;
-    found_addr = 0;
+    g_assert(env->found_size == 0);
+    access->n_pages = env->found_index;
+    env->found_index = 0;
+    env->found_size = 0;
+    env->found_addr = 0;
 
     return access->n_pages;
 }
@@ -430,22 +387,26 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
         if(same_sub) {
             debug_printf("Slowdown FPM\n");
             delay = FPM_DELAY(size);
-            stat->in_fpm += size;
+            atomic_add(&stat->in_fpm, size);
+            // stat->in_fpm += size;
         } else {
             debug_printf("Slowdown PSM 2, sub %lx != sub %lx\n", subs, subd);
             delay = PSM_DELAY(size) * 2;
-            stat->in_psm += size;
+            atomic_add(&stat->in_psm, size);
+            // stat->in_psm += size;
         }
     } else if(same_rc){ // diff bank, same channel/rank, PSM
         debug_printf("Slowdown PSM, bank %lx != bank %lx\n", banks, bankd);
         delay = PSM_DELAY(size);
-        stat->in_psm += size;
+        atomic_add(&stat->in_psm, size);
+        // stat->in_psm += size;
     } else { // different bank, but different channel
         debug_printf("Slowdown CPU, bank %lx == bank %lx\n", banks, bankd);
         return CPU_DELAY(size);
     }
 
-    stat->general.in_pim += size;
+    // stat->general.in_pim += size;
+    atomic_add(&stat->general.in_pim, size);
 
     return delay;
 }
@@ -510,30 +471,37 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
     if(n_same_sub == 3){
         // if 3 same bank same sub --> 3*FPM
         debug_printf("All three in same sub, FPM\n");
-        stat->in_fpm += size;
+        // stat->in_fpm += size;
+        atomic_add(&stat->in_fpm, size);
     } else if (n_same_sub == 2) {
         if (n_same_bank == 3) {
             // if 2 same bank same sub, 1 diff sub -> 2*PSM + 2*FPM
             debug_printf("2 same sub, 1 diff sub, same bank\n");
-            stat->in_fpm += size/2;
-            stat->in_psm += size/2;
+            atomic_add(&stat->in_fpm, size/2);
+            atomic_add(&stat->in_psm, size/2);
+            // stat->in_fpm += size/2;
+            // stat->in_psm += size/2;
         } else if (n_same_rc == 3) {
             // if 2 same bank same sub, 1 diff bank same rc -> PSM + 2*FPM
             debug_printf("2 same sub, 1 diff bank same rc\n");
-            stat->in_fpm += size/3 * 2;
-            stat->in_psm += size/3;
+            // stat->in_fpm += size/3 * 2;
+            // stat->in_psm += size/3;
+            atomic_add(&stat->in_fpm, size/3*2);
+            atomic_add(&stat->in_psm, size/3);
         } else {
             // if 2 same bank same sub, 1 diff bank diff rc -> CPU + 2*FPM
             debug_printf("2 same sub, 1 diff bank diff rc\n");
             size = size/3 *2;
-            stat->in_fpm += size;
+            // stat->in_fpm += size;
+            atomic_add(&stat->in_fpm, size);
             // 1/3 is CPU
         }
     } else if (n_same_bank == 3) {
         g_assert(n_same_sub == 0);
         // if 3 same bank diff sub (all diff) -> 3*PSM
         debug_printf("3 same bank, diff sub (all diff)\n");
-        stat->in_psm += size;
+        // stat->in_psm += size;
+        atomic_add(&stat->in_psm, size);
     } else if (n_same_bank == 2) {
         g_assert(n_same_sub == 0);
         g_assert(n_same_rc != 0);
@@ -541,27 +509,34 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
         if(n_same_rc == 3){
             // if 2 same bank diff sub, 1 diff bank same rc -> 2*PSM + FPM
             debug_printf("2 same bank diff sub, 1 diff bank same rc\n");
-            stat->in_fpm += size/3;
-            stat->in_psm += size/3 * 2;
+            // stat->in_fpm += size/3;
+            // stat->in_psm += size/3 * 2;
+            atomic_add(&stat->in_fpm, size/3);
+            atomic_add(&stat->in_psm, size/3*2);
         } else {
             // if 2 same bank diff sub, 1 diff bank diff rc -> 2*PSM + CPU
             debug_printf("2 same bank diff sub, 1 diff bank diff rc\n");
             size = size/3 *2;
-            stat->in_psm += size;
+            // stat->in_psm += size;
+            atomic_add(&stat->in_psm, size);
             // 1/3 is CPU
         }
     } else if (n_same_rc == 3) {
         g_assert(n_same_bank == 0);
         // if 3 diff bank same rc (all diff) -> 2*PSM + FPM
         debug_printf("3 diff bank same rc (all diff)\n");
-        stat->in_fpm += size/3;
-        stat->in_psm += size/3 * 2;
+        // stat->in_fpm += size/3;
+        // stat->in_psm += size/3 * 2;
+        atomic_add(&stat->in_fpm, size/3);
+        atomic_add(&stat->in_psm, size/3*2);
     } else if (n_same_rc == 2) {
         g_assert(n_same_bank == 0);
         // if 2 diff bank same rc, 1 diff bank diff rc -> PSM + FPM + CPU
         size = size/3;
-        stat->in_fpm += size;
-        stat->in_psm += size;
+        // stat->in_fpm += size;
+        // stat->in_psm += size;
+        atomic_add(&stat->in_fpm, size);
+        atomic_add(&stat->in_psm, size);
         // 1/3 is CPU
         size *= 2;
     } else {
@@ -569,14 +544,14 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
         // if 3 diff bank diff rc (all diff) -> 2*CPU + FPM
         debug_printf("3 diff bank diff rc (all diff)\n");
         size = size/3;
-        stat->in_fpm += size;
+        // stat->in_fpm += size;
+        atomic_add(&stat->in_fpm, size);
         // 2/3 is CPU
     }
 
     stat->general.in_pim += size;
     return delay;
 }
-
 
 static hwaddr get_next_address(hwaddr addr, int level, dram_cpu_info *info)
 {
@@ -835,15 +810,7 @@ static void init_zero_row(uint64_t row_size)
 
 // ########################## RCC ###############################
 #if !defined(CONFIG_USER_ONLY)
-static RISCVAccess rcc_src_access, rcc_dest_access;
-static int rcc_mmu_idx;
-static bool rcc_faulted_all_src = false, rcc_faulted_all_dest = false;
-static TCGMemOpIdx rcc_oi;
 static rcc_stats rcc_stat;
-static int rcc_missed_src[100];
-static int n_rcc_missed_src;
-static int rcc_missed_dest[100];
-static int n_rcc_missed_dest;
 
 static void perform_rcc_op(partial_row_list *partial_src,
                                partial_row_list *partial_dest)
@@ -973,12 +940,12 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
     uint64_t delay_op = 0;
 
     /* Only init once */
-    if(rcc_src_access.pages == NULL) {
-        rcc_mmu_idx = cpu_mmu_index(env, false);
-        rcc_oi = make_memop_idx(MO_UB, rcc_mmu_idx);
+    if(env->rc_src_access.n_pages == 0) {
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
 
-        init_riscv_access(&rcc_src_access, src, size);
-        init_riscv_access(&rcc_dest_access, dest, size);
+        init_riscv_access(&env->rc_src_access, src, size);
+        init_riscv_access(&env->rc_dest_access, dest, size);
     }
 
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
@@ -987,50 +954,47 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
      * can re-executed becauses find_all_pages triggers a pf. */
     
     /* Pre-fault all src pages once */
-    if(rcc_faulted_all_src == false) {
-        rcc_stat.general.avg_pf.sum++;
-        find_all_pages(env, &rcc_src_access, MMU_DATA_LOAD, info, rcc_mmu_idx, rcc_oi, GETPC());
-        rcc_faulted_all_src = true;
+    if(env->rc_faulted_all_src == false) {
+        atomic_inc(&rcc_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, GETPC());
+        env->rc_faulted_all_src = true;
     }
 
     /* Pre-fault all dest pages once */
-    if(rcc_faulted_all_dest == false) {
-        rcc_stat.general.avg_pf.sum++;
-        find_all_pages(env, &rcc_dest_access, MMU_DATA_STORE, info, rcc_mmu_idx, rcc_oi, GETPC());
-        rcc_faulted_all_dest = true;
+    if(env->rc_faulted_all_dest == false) {
+        atomic_inc(&rcc_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
+        env->rc_faulted_all_dest = true;
     }
 
-    n_rcc_missed_src = init_rowlist(env, info, &rcc_src_access, &row_src, &partial_src, rcc_missed_src);
-    n_rcc_missed_dest = init_rowlist(env, info, &rcc_dest_access, &row_dest, &partial_dest, rcc_missed_dest);
+    init_rowlist(env, info, &env->rc_src_access, &row_src, &partial_src);
+    init_rowlist(env, info, &env->rc_dest_access, &row_dest, &partial_dest);
 
-    rcc_stat.general.tot_bytes += size;
+    atomic_add(&rcc_stat.general.tot_bytes, size);
 
     /* Core operation, perform the actual copy */
     perform_rcc_op(&partial_src, &partial_dest);
     delay_op = perform_rcc_delay(env, &row_src, &row_dest, info);
 
-    /* missed ones, should be done manually */
-    g_assert(n_rcc_missed_src == 0 && n_rcc_missed_dest == 0);
-
     /* Final stats bookeeping and cleanup */
-    rcc_stat.general.avg_delay.sum += delay_op;
+    atomic_add(&rcc_stat.general.avg_delay.sum, delay_op);
 #if USE_STDEV_STDERR
     g_assert(rcc_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
     rcc_stat.general.del_val[rcc_stat.general.avg_delay.n] = delay_op;
 #endif
-    rcc_stat.general.avg_delay.n++;
-    rcc_stat.general.avg_pf.sum -= 2;
-    rcc_stat.general.avg_pf.n++;
+    atomic_inc(&rcc_stat.general.avg_delay.n);
+    atomic_sub(&rcc_stat.general.avg_pf.sum, 2);
+    atomic_inc(&rcc_stat.general.avg_pf.n);
 
     del_rowlist(&row_src);
     del_rowlist(&row_dest);
     del_partiallist(&partial_src);
     del_partiallist(&partial_dest);
-    del_riscv_access(&rcc_src_access);
-    del_riscv_access(&rcc_dest_access);
+    del_riscv_access(&env->rc_src_access);
+    del_riscv_access(&env->rc_dest_access);
 
-    rcc_faulted_all_dest = false;
-    rcc_faulted_all_src = false;
+    env->rc_faulted_all_dest = false;
+    env->rc_faulted_all_src = false;
     debug_printf("#######################\n");
 
 #endif
@@ -1039,12 +1003,7 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
 
 // ########################## RCI ###############################
 #if !defined(CONFIG_USER_ONLY)
-static RISCVAccess rci_access;
-static int rci_mmu_idx;
-static TCGMemOpIdx rci_oi;
 static rci_stats rci_stat;
-static int rci_missed[100];
-static int n_rci_missed = 0;
 
 static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
                             dram_cpu_info *info)
@@ -1062,7 +1021,7 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
         if(tmp->usage == row_size){
             debug_printf("FAST PIM\n");
             delay = FPM_DELAY(row_size);
-            rci_stat.in_pim += row_size;
+            atomic_add(&rci_stat.in_pim, row_size);
 
             set_to_row(zero_row, tmp->addr, tmp->host, info, row_size);
         } else {
@@ -1077,7 +1036,7 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
                 g_assert(ttmp->row_parent == tmp);
                 // debug_printf("copying from %p till %p sz %lu\n", ttmp->host, (void *) ((uint64_t) ttmp->host + ttmp->size), ttmp->size);
                 memset(ttmp->host, MEMSET_BYTE, ttmp->size);
-                rci_access.pages[ttmp->page_parent].size -= ttmp->size;
+                env->rc_src_access.pages[ttmp->page_parent].size -= ttmp->size;
             }
         }
 
@@ -1088,24 +1047,27 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
     return delay_op;
 }
 
+#if 0
+// control commit on dec 10
 static uint64_t perform_rci_missed(CPURISCVState *env)
 {
     uint64_t delay_op = 0;
 
     /* rci_missed pages (the ones that have to be set manually) */
     for (int i=0; i < n_rci_missed; i++) {
-        rci_stat.other += rci_access.pages[rci_missed[i]].size;
-        slow_down_by(env, rci_access.pages[rci_missed[i]].size);
-        delay_op += rci_access.pages[rci_missed[i]].size;
+        rci_stat.otherATOM += env->rc_src_access.pages[rci_missed[i]].size;
+        slow_down_by(env, env->rc_src_access.pages[rci_missed[i]].size);
+        delay_op += env->rc_src_access.pages[rci_missed[i]].size;
 
         /* No luck, do it manually */
-        for (int j = 0; j < rci_access.pages[rci_missed[i]].size; j++) {
-            helper_ret_stb_mmu(env, rci_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, rci_oi, GETPC());
+        for (int j = 0; j < env->rc_src_access.pages[rci_missed[i]].size; j++) {
+            helper_ret_stb_mmu(env, env->rc_src_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, env->rc_oi, GETPC());
         }
     }
 
     return delay_op;
 }
+#endif
 #else 
 
 static void perform_rci_user(target_ulong dest, target_ulong size)
@@ -1137,10 +1099,10 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     uint64_t delay_op;
 
     /* Only init once */
-    if(rci_access.pages == NULL) {
-        rci_mmu_idx = cpu_mmu_index(env, false);
-        rci_oi = make_memop_idx(MO_UB, rci_mmu_idx);
-        init_riscv_access(&rci_access, dest, size);
+    if(env->rc_src_access.n_pages == 0) {
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
+        init_riscv_access(&env->rc_src_access, dest, size);
     }
 
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
@@ -1148,35 +1110,35 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    rci_stat.avg_pf.sum++;
-    find_all_pages(env, &rci_access, MMU_DATA_STORE, info, rci_mmu_idx, rci_oi, GETPC());
+    atomic_inc(&rci_stat.avg_pf.sum);
+    find_all_pages(env, &env->rc_src_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
 
     /* pre-init the zero rowbuffer*/
     init_zero_row(row_size);
 
     /* Stats bookeeping */
-    rci_stat.tot_bytes += size;
+    atomic_add(&rci_stat.tot_bytes, size);
 
     /* parse pages in row and partial rows */
-    n_rci_missed = init_rowlist(env, info, &rci_access, &rows, &partial_rows, rci_missed);
+    init_rowlist(env, info, &env->rc_src_access, &rows, &partial_rows);
 
     /* Core operation, perform the actual memset */
     delay_op = perform_rci(env, &rows, info);
-    delay_op += perform_rci_missed(env);
 
     /* Final stats, and cleanup */
-    rci_stat.avg_delay.sum += delay_op;
+    atomic_add(&rci_stat.avg_delay.sum, delay_op);
+
 #if USE_STDEV_STDERR
     g_assert(rci_stat.avg_delay.n < STAT_MAX_DEL_VAL);
     rci_stat.del_val[rci_stat.avg_delay.n] = delay_op;
 #endif
-    rci_stat.avg_delay.n++;
-    rci_stat.avg_pf.sum--;
-    rci_stat.avg_pf.n++;
+    atomic_inc(&rci_stat.avg_delay.n);
+    atomic_dec(&rci_stat.avg_pf.sum);
+    atomic_inc(&rci_stat.avg_pf.n);
 
     del_rowlist(&rows);
     del_partiallist(&partial_rows);
-    del_riscv_access(&rci_access);
+    del_riscv_access(&env->rc_src_access);
 
     debug_printf("#######################\n");
 #endif
@@ -1185,9 +1147,6 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
 
 // ########################## RCIK ###############################
 #if !defined(CONFIG_USER_ONLY)
-static RISCVAccess rcik_access;
-static int rcik_mmu_idx;
-static TCGMemOpIdx rcik_oi;
 static rci_stats rcik_stat;
 #endif
 
@@ -1209,11 +1168,11 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
 
     /* Only init once */
-    if(rcik_access.pages == NULL) {
+    if(env->rc_src_access.n_pages == 0) {
         // printf("RCIK request\n");
-        rcik_mmu_idx = cpu_mmu_index(env, false);
-        rcik_oi = make_memop_idx(MO_UB, rcik_mmu_idx);
-        init_riscv_access(&rcik_access, row_dest, get_msb(info->col.mask));
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
+        init_riscv_access(&env->rc_src_access, row_dest, get_msb(info->col.mask));
     }
 
     row_size = info->col.size;
@@ -1221,49 +1180,47 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    rcik_stat.avg_pf.sum++;
-    rcik_access.size = 1;
+    atomic_inc(&rcik_stat.avg_pf.sum);
+    // env->rc_src_access.size = 1;
 
-    find_all_pages(env, &rcik_access, MMU_DATA_STORE, info, rcik_mmu_idx, rcik_oi, GETPC());
-    // printf("Phys addr %lx, Vaddr %lx\n", rcik_access.pages[0].phys_addr, (uint64_t) rcik_access.pages[0].v_addr);
-    g_assert(rcik_access.n_pages == 1);
+    find_all_pages(env, &env->rc_src_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
+    // printf("Phys addr %lx, Vaddr %lx\n", env->rc_src_access.pages[0].phys_addr, (uint64_t) env->rc_src_access.pages[0].v_addr);
+    g_assert(env->rc_src_access.n_pages == 1);
 
     // if the row is unaligned, error. Keep the instrucion as simple as poss
-    offset_row = rcik_access.pages[0].phys_addr & info->col.mask;
+    offset_row = env->rc_src_access.pages[0].phys_addr & info->col.mask;
     g_assert(offset_row == 0);
 
     /* Stats bookeeping */
-    rcik_stat.tot_bytes += row_size;
+    atomic_add(&rcik_stat.tot_bytes, row_size);
 
-    set_to_row(zero_row, rcik_access.pages[0].phys_addr, rcik_access.pages[0].host_addr, info, row_size);
+    set_to_row(zero_row, env->rc_src_access.pages[0].phys_addr, env->rc_src_access.pages[0].host_addr, info, row_size);
 
     // printf("Full size, full speed\n");
     delay = FPM_DELAY(row_size);
-    rcik_stat.in_pim += row_size;
+    atomic_add(&rcik_stat.in_pim, row_size);
+
     slow_down_by(env, delay);
 
     /* Final stats, and cleanup */
-    rcik_stat.avg_delay.sum += delay;
+    atomic_add(&rcik_stat.avg_delay.sum, delay);
+
 #if USE_STDEV_STDERR
     g_assert(rcik_stat.avg_delay.n < STAT_MAX_DEL_VAL);
     rcik_stat.del_val[rcik_stat.avg_delay.n] = delay;
 #endif
-    rcik_stat.avg_delay.n++;
-    rcik_stat.avg_pf.sum--;
-    rcik_stat.avg_pf.n++;
+    atomic_inc(&rcik_stat.avg_delay.n);
+    atomic_dec(&rcik_stat.avg_pf.sum);
+    atomic_inc(&rcik_stat.avg_pf.n);
 
-    del_riscv_access(&rcik_access);
+    del_riscv_access(&env->rc_src_access);
 #endif
 }
 
 
 // ########################## RCCK ###############################
 #if !defined(CONFIG_USER_ONLY)
-static RISCVAccess rcck_src_access, rcck_dest_access;
-static int rcck_mmu_idx;
 static rcc_stats rcck_stat;
-static bool rcck_faulted_all_src = false, rcck_faulted_all_dest = false;
-static TCGMemOpIdx rcck_oi;
 
 static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong dest, uintptr_t curr_pc, row_src_dest row_fn)
 {
@@ -1279,39 +1236,39 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
     row_size = info->col.size;
 
     /* Only init once */
-    if(rcck_src_access.pages == NULL) {
+    if(env->rc_src_access.n_pages == 0) {
         // printf("###############\nRCCK request %lx %lx\n", (uint64_t) src, (uint64_t) dest);
-        rcck_mmu_idx = cpu_mmu_index(env, false);
-        rcck_oi = make_memop_idx(MO_UB, rcck_mmu_idx);
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
 
-        init_riscv_access(&rcck_src_access, src, get_msb(info->col.mask));
-        init_riscv_access(&rcck_dest_access, dest, get_msb(info->col.mask));
+        init_riscv_access(&env->rc_src_access, src, get_msb(info->col.mask));
+        init_riscv_access(&env->rc_dest_access, dest, get_msb(info->col.mask));
 
-        // rcck_src_access.size = 1;
-        // rcck_dest_access.size = 1;
+        // env->rc_src_access.size = 1;
+        // env->rc_dest_access.size = 1;
     }
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
 
     /* Pre-fault all src pages once */
-    if(rcck_faulted_all_src == false) {
-        rcck_stat.general.avg_pf.sum++;
-        find_all_pages(env, &rcck_src_access, MMU_DATA_LOAD, info, rcck_mmu_idx, rcck_oi, curr_pc);
-        rcck_faulted_all_src = true;
+    if(env->rc_faulted_all_src == false) {
+        atomic_inc(&rcck_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_src = true;
     }
 
     /* Pre-fault all dest pages once */
-    if(rcck_faulted_all_dest == false) {
-        rcck_stat.general.avg_pf.sum++;
-        find_all_pages(env, &rcck_dest_access, MMU_DATA_STORE, info, rcck_mmu_idx, rcck_oi, curr_pc);
-        rcck_faulted_all_dest = true;
+    if(env->rc_faulted_all_dest == false) {
+        atomic_inc(&rcck_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_dest = true;
     }
 
-    rcck_stat.general.tot_bytes += row_size;
+    atomic_add(&rcck_stat.general.tot_bytes, row_size);
 
-    hwaddr phys_src = rcck_src_access.pages[0].phys_addr;
-    hwaddr phys_dest = rcck_dest_access.pages[0].phys_addr;
+    hwaddr phys_src = env->rc_src_access.pages[0].phys_addr;
+    hwaddr phys_dest = env->rc_dest_access.pages[0].phys_addr;
     hwaddr offset_src, offset_dest;
 
     offset_src = phys_src & info->col.mask;
@@ -1321,28 +1278,30 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
 
     /* Core operation, perform the actual copy */
     row_fn(phys_src,
-            rcck_src_access.pages[0].host_addr,
+            env->rc_src_access.pages[0].host_addr,
             phys_dest,
-            rcck_dest_access.pages[0].host_addr, info, row_size);
+            env->rc_dest_access.pages[0].host_addr, info, row_size);
 
     /* Calculate the actual delay */
     delay_op = fpm_psm_delay(env, row_size, phys_src, phys_dest, &rcck_stat);
 
     /* Final stats bookeeping and cleanup */
-    rcck_stat.general.avg_delay.sum += delay_op;
+    atomic_add(&rcck_stat.general.avg_delay.sum, delay_op);
+
 #if USE_STDEV_STDERR
     g_assert(rcck_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
     rcck_stat.general.del_val[rcck_stat.general.avg_delay.n] = delay_op;
 #endif
-    rcck_stat.general.avg_delay.n++;
-    rcck_stat.general.avg_pf.sum -= 2;
-    rcck_stat.general.avg_pf.n++;
 
-    del_riscv_access(&rcck_src_access);
-    del_riscv_access(&rcck_dest_access);
+    atomic_inc(&rcck_stat.general.avg_delay.n);
+    atomic_sub(&rcck_stat.general.avg_pf.sum, 2);
+    atomic_inc(&rcck_stat.general.avg_pf.n);
 
-    rcck_faulted_all_dest = false;
-    rcck_faulted_all_src = false;
+    del_riscv_access(&env->rc_src_access);
+    del_riscv_access(&env->rc_dest_access);
+
+    env->rc_faulted_all_dest = false;
+    env->rc_faulted_all_src = false;
     debug_printf("#######################\n");
 }
 #endif
@@ -1364,11 +1323,7 @@ void helper_anot(CPURISCVState *env, target_ulong src, target_ulong dest)
 
 // ########################## AMBIT OR/AND ###############################
 #if !defined(CONFIG_USER_ONLY)
-static RISCVAccess ambit_src1_access, ambit_src2_access, ambit_dest_access;
-static int ambit_mmu_idx;
 static rcc_stats ambit_stat;
-static bool ambit_faulted_all_src1 = false,  ambit_faulted_all_src2 = false, ambit_faulted_all_dest = false;
-static TCGMemOpIdx ambit_oi;
 
 static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest, uintptr_t curr_pc, row_ambit row_fn)
 {
@@ -1384,47 +1339,47 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
     row_size = info->col.size;
 
     /* Only init once */
-    if(ambit_src1_access.pages == NULL) {
-        ambit_mmu_idx = cpu_mmu_index(env, false);
-        ambit_oi = make_memop_idx(MO_UB, ambit_mmu_idx);
+    if(env->rc_src_access.n_pages == 0) {
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
 
-        init_riscv_access(&ambit_src1_access, src1, get_msb(info->col.mask));
-        init_riscv_access(&ambit_src2_access, src2, get_msb(info->col.mask));
-        init_riscv_access(&ambit_dest_access, dest, get_msb(info->col.mask));
+        init_riscv_access(&env->rc_src_access, src1, get_msb(info->col.mask));
+        init_riscv_access(&env->rc_src2_access, src2, get_msb(info->col.mask));
+        init_riscv_access(&env->rc_dest_access, dest, get_msb(info->col.mask));
 
-        // ambit_src1_access.size = 1;
-        // ambit_src2_access.size = 1;
-        // ambit_dest_access.size = 1;
+        // env->rc_src_access.size = 1;
+        // env->rc_src2_access.size = 1;
+        // env->rc_dest_access.size = 1;
     }
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
 
     /* Pre-fault all src pages once */
-    if(ambit_faulted_all_src1 == false) {
-        ambit_stat.general.avg_pf.sum++;
-        find_all_pages(env, &ambit_src1_access, MMU_DATA_LOAD, info, ambit_mmu_idx, ambit_oi, curr_pc);
-        ambit_faulted_all_src1 = true;
+    if(env->rc_faulted_all_src == false) {
+        atomic_inc(&ambit_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_src = true;
     }
 
-    if(ambit_faulted_all_src2 == false) {
-        ambit_stat.general.avg_pf.sum++;
-        find_all_pages(env, &ambit_src2_access, MMU_DATA_LOAD, info, ambit_mmu_idx, ambit_oi, curr_pc);
-        ambit_faulted_all_src2 = true;
+    if(env->rc_faulted_all_src2 == false) {
+        atomic_inc(&ambit_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src2_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_src2 = true;
     }
 
     /* Pre-fault all dest pages once */
-    if(ambit_faulted_all_dest == false) {
-        ambit_stat.general.avg_pf.sum++;
-        find_all_pages(env, &ambit_dest_access, MMU_DATA_STORE, info, ambit_mmu_idx, ambit_oi, curr_pc);
-        ambit_faulted_all_dest = true;
+    if(env->rc_faulted_all_dest == false) {
+        atomic_inc(&ambit_stat.general.avg_pf.sum);
+        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_dest = true;
     }
 
-    ambit_stat.general.tot_bytes += row_size;
+    atomic_add(&ambit_stat.general.tot_bytes, row_size);
 
-    hwaddr phys_src1 = ambit_src1_access.pages[0].phys_addr;
-    hwaddr phys_src2 = ambit_src2_access.pages[0].phys_addr;
-    hwaddr phys_dest = ambit_dest_access.pages[0].phys_addr;
+    hwaddr phys_src1 = env->rc_src_access.pages[0].phys_addr;
+    hwaddr phys_src2 = env->rc_src2_access.pages[0].phys_addr;
+    hwaddr phys_dest = env->rc_dest_access.pages[0].phys_addr;
     hwaddr offset_src1, offset_src2, offset_dest;
 
     offset_src1 = phys_src1 & info->col.mask;
@@ -1437,34 +1392,34 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
 
     /* Core operation, perform the actual copy */
     row_fn(phys_src1,
-           ambit_src1_access.pages[0].host_addr,
+           env->rc_src_access.pages[0].host_addr,
            phys_src2,
-           ambit_src2_access.pages[0].host_addr,
+           env->rc_src2_access.pages[0].host_addr,
            phys_dest,
-           ambit_dest_access.pages[0].host_addr, info, row_size);
+           env->rc_dest_access.pages[0].host_addr, info, row_size);
 
     /* Calculate the actual delay */
     delay_op = tri_fpm_psm_delay(env, row_size, phys_src1, phys_src2, phys_dest, &ambit_stat);
 
     /* Final stats bookeeping and cleanup */
-    ambit_stat.general.avg_delay.sum += delay_op;
+    atomic_add(&ambit_stat.general.avg_delay.sum, delay_op);
+
 #if USE_STDEV_STDERR
-    g_assert(ambit_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
-    ambit_stat.general.del_val[ambit_stat.general.avg_delay.n] = delay_op;
+    g_assert(ambit_stat.general.avg_delay.nATOM < STAT_MAX_DEL_VAL);
+    ambit_stat.general.del_val[ambit_stat.general.avg_delay.nATOM] = delay_op;
 #endif
-    ambit_stat.general.avg_delay.n++;
-    ambit_stat.general.avg_pf.sum -= 3;
-    ambit_stat.general.avg_pf.n++;
+    atomic_inc(&ambit_stat.general.avg_delay.n);
+    atomic_sub(&ambit_stat.general.avg_pf.sum, 3);
+    atomic_inc(&ambit_stat.general.avg_pf.n);
 
-    del_riscv_access(&ambit_src1_access);
-    del_riscv_access(&ambit_src2_access);
-    del_riscv_access(&ambit_dest_access);
+    del_riscv_access(&env->rc_src_access);
+    del_riscv_access(&env->rc_src2_access);
+    del_riscv_access(&env->rc_dest_access);
 
-    ambit_faulted_all_dest = false;
-    ambit_faulted_all_src1 = false;
-    ambit_faulted_all_src2 = false;
+    env->rc_faulted_all_dest = false;
+    env->rc_faulted_all_src = false;
+    env->rc_faulted_all_src2 = false;
     debug_printf("#######################\n");
-
 }
 
 #endif
@@ -1648,23 +1603,23 @@ void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
 
 static void helper_stat_i(target_ulong val)
 {
-    rcik_stat.tot_bytes += val;
-    rcik_stat.avg_delay.sum += CPU_DELAY(val);
-    rcik_stat.avg_delay.n++;
+    atomic_add(&rcik_stat.tot_bytes, val);
+    atomic_add(&rcik_stat.avg_delay.sum, CPU_DELAY(val));
+    atomic_inc(&rcik_stat.avg_delay.n);
 }
 
 static void helper_stat_c(target_ulong val)
 {
-    rcck_stat.general.tot_bytes += val;
-    rcck_stat.general.avg_delay.sum += CPU_DELAY(val);
-    rcck_stat.general.avg_delay.n++;
+    atomic_add(&rcck_stat.general.tot_bytes, val);
+    atomic_add(&rcck_stat.general.avg_delay.sum, CPU_DELAY(val));
+    atomic_inc(&rcck_stat.general.avg_delay.n);
 }
 
 static void helper_stat_a(target_ulong val)
 {
-    ambit_stat.general.tot_bytes += val;
-    ambit_stat.general.avg_delay.sum += CPU_DELAY(val);
-    ambit_stat.general.avg_delay.n++;
+    atomic_add(&ambit_stat.general.tot_bytes, val);
+    atomic_add(&ambit_stat.general.avg_delay.sum, CPU_DELAY(val));
+    atomic_inc(&ambit_stat.general.avg_delay.n);
 }
 #endif
 

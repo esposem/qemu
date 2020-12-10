@@ -535,6 +535,21 @@ static void riscv_cpu_init(Object *obj)
     read_dram_info_file(&cpu->dram_info);
     get_partial_rows_bits(&cpu->dram_info);
 
+    env->found_index = 0;
+    env->found_size = 0;
+    env->found_addr = 0;
+    memset(&env->rc_src_access, 0, sizeof(RISCVAccess));
+    memset(&env->rc_src2_access, 0, sizeof(RISCVAccess));
+    memset(&env->rc_dest_access, 0, sizeof(RISCVAccess));
+    env->rc_faulted_all_src = false;
+    env->rc_faulted_all_src2 = false;
+    env->rc_faulted_all_dest = false;
+    memset(&env->rcc_stat, 0, sizeof(rcc_stats));
+    memset(&env->rci_stat, 0, sizeof(rci_stats));
+    memset(&env->rcik_stat, 0, sizeof(rci_stats));
+    memset(&env->rcck_stat, 0, sizeof(rcc_stats));
+    memset(&env->ambit_stat, 0, sizeof(rcc_stats));
+
     qemu_mutex_init(&env->op_mutex);
 
     env->op_timer = timer_new_us(QEMU_CLOCK_VIRTUAL, dram_release_timer, env);
@@ -563,6 +578,15 @@ static void riscv_cpu_destroy(Object *obj)
     qemu_mutex_destroy(&env->op_mutex);
     timer_del(env->op_timer);
     timer_free(env->op_timer);
+
+    if(env->rc_src_access.pages)
+        free(env->rc_src_access.pages);
+
+    if(env->rc_src2_access.pages)
+        free(env->rc_src_access.pages);
+
+    if(env->rc_dest_access.pages)
+        free(env->rc_src_access.pages);
 }
 
 #ifndef CONFIG_USER_ONLY
