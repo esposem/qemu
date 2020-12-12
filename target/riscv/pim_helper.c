@@ -1185,7 +1185,6 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 
     find_all_pages(env, &env->rc_src_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
     // printf("Phys addr %lx, Vaddr %lx\n", env->rc_src_access.pages[0].phys_addr, (uint64_t) env->rc_src_access.pages[0].v_addr);
-    g_assert(env->rc_src_access.n_pages == 1);
 
     // if the row is unaligned, error. Keep the instrucion as simple as poss
     offset_row = env->rc_src_access.pages[0].phys_addr & info->col.mask;
