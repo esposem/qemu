@@ -70,27 +70,43 @@ static inline void init_default_dram_elements(dram_cpu_info *dram)
 {
     dram->channel.n_sections = 1;
     dram->channel.bits[0] = 1;
+    dram->channel.offsets[0] = 32;
     dram->channel.mask = 0x100000000;
+    dram->channel.size = 2;
 
     dram->rank.n_sections = 1;
     dram->rank.bits[0] = 1;
+    dram->rank.offsets[0] = 31;
     dram->rank.mask = 0x80000000;
+    dram->rank.size = 2;
 
     dram->row.n_sections = 1;
-    dram->row.bits[0] = 15;
+    dram->row.bits[0] = 16;
+    dram->row.offsets[0] = 15;
     dram->row.mask = 0x7fff8000;
+    dram->row.size = 65536;
 
     dram->subarr.n_sections = 1;
-    dram->subarr.bits[0] = 6;
+    dram->subarr.bits[0] = 7;
+    dram->subarr.offsets[0] = 24;
     dram->subarr.mask = 0x7f000000;
+    dram->subarr.size = 128;
 
     dram->bank.n_sections = 1;
     dram->bank.bits[0] = 3;
+    dram->bank.offsets[0] = 12;
     dram->bank.mask = 0x00007000;
+    dram->bank.size = 8;
 
     dram->col.n_sections = 1;
     dram->col.bits[0] = 12;
     dram->col.mask = 0x00000fff;
+    dram->col.size = 4096;
+
+    dram->part_row_end = 0xfff;
+
+    dram->offset = 0x80000000;
+    dram->size = 0x200000000;
 }
 
 static inline hwaddr get_el_value(dram_element_info *el, hwaddr addr)
