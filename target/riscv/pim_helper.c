@@ -10,7 +10,7 @@
 #include "internals.h"
 #include <math.h>
 
-#define MEMSET_BYTE 1
+#define MEMSET_BYTE 1 /* FIXME: */
 #define ENABLE_DELAY 0
 
 #define CACHE_LINE_SIZE 64
@@ -1144,7 +1144,6 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
 #endif
 }
 
-
 // ########################## RCIK ###############################
 #if !defined(CONFIG_USER_ONLY)
 static rci_stats rcik_stat;
@@ -1217,7 +1216,7 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 }
 
 
-// ########################## RCCK ###############################
+// ########################## RCCK / ANOTK ###############################
 #if !defined(CONFIG_USER_ONLY)
 static rcc_stats rcck_stat;
 
@@ -1312,7 +1311,7 @@ void helper_rcck(CPURISCVState *env, target_ulong src, target_ulong dest)
 #endif
 }
 
-void helper_anot(CPURISCVState *env, target_ulong src, target_ulong dest)
+void helper_anotk(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
     // printf("helper_anot\n");
@@ -1320,7 +1319,7 @@ void helper_anot(CPURISCVState *env, target_ulong src, target_ulong dest)
 #endif
 }
 
-// ########################## AMBIT OR/AND ###############################
+// ########################## AMBIT ORK/ANDK ###############################
 #if !defined(CONFIG_USER_ONLY)
 static rcc_stats ambit_stat;
 
@@ -1423,14 +1422,14 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
 
 #endif
 
-void helper_aand(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
+void helper_aandk(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
     helper_ambit(env, src1, src2, dest, GETPC(), row_and);
 #endif
 }
 
-void helper_aor(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
+void helper_aork(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
     helper_ambit(env, src1, src2, dest, GETPC(), row_or);

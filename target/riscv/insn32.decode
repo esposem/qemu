@@ -99,9 +99,9 @@ sfence_vma  0001001    ..... ..... 000 00000 1110011 @sfence_vma
 rcck        0001011    ..... ..... 000 00000 1110011 @sfence_vma # rcc kernel
 sfence_vm   0001000    00100 ..... 000 00000 1110011 @sfence_vm
 rcik        0001010    00110 ..... 000 00000 1110011 @sfence_vm # rci kernel
-aor         0001100    ..... ..... 000 ..... 1110011 @r # ambit or
-aand        0001101    ..... ..... 000 ..... 1110011 @r # ambit and
-anot        0001110    ..... ..... 000 00000 1110011 @sfence_vma # ambit not
+aork        0001100    ..... ..... 000 ..... 1110011 @r # ambit or
+aandk       0001101    ..... ..... 000 ..... 1110011 @r # ambit and
+anotk       0001110    ..... ..... 000 00000 1110011 @sfence_vma # ambit not
 
 # *** RV32I Base Instruction Set ***
 lui      ....................       ..... 0110111 @u

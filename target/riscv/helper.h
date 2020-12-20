@@ -4,9 +4,9 @@ DEF_HELPER_2(raise_exception, noreturn, env, i32)
 /* Floating Point - rounding mode */
 DEF_HELPER_FLAGS_2(set_rounding_mode, TCG_CALL_NO_WG, void, env, i32)
 
-DEF_HELPER_4(aor, void, env, tl, tl, tl)
-DEF_HELPER_4(aand, void, env, tl, tl, tl)
-DEF_HELPER_3(anot, void, env, tl, tl)
+DEF_HELPER_4(aork, void, env, tl, tl, tl)
+DEF_HELPER_4(aandk, void, env, tl, tl, tl)
+DEF_HELPER_3(anotk, void, env, tl, tl)
 DEF_HELPER_4(rcc, void, env, tl, tl, tl)
 DEF_HELPER_3(rci, void, env, tl, tl)
 DEF_HELPER_3(stat, void, env, tl, tl)
