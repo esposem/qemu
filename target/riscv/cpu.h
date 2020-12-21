@@ -285,12 +285,6 @@ struct CPURISCVState {
     bool rc_faulted_all_src2;
     bool rc_faulted_all_dest;
     uint32_t rc_oi;
-    rcc_stats rcc_stat;
-    rci_stats rci_stat;
-    rci_stats rcik_stat;
-    rcc_stats rcck_stat;
-    rcc_stats ambit_stat;
-
 
     /* Fields from here on are preserved across CPU reset. */
     QEMUTimer *timer; /* Internal timer */

@@ -95,12 +95,14 @@ static void init_riscv_access(RISCVAccess *access, target_ulong src, target_ulon
 
     n_pages = (size / TARGET_PAGE_SIZE) + 1;
     access->n_pages = n_pages;
-    access->max_pages = MAX(n_pages, access->max_pages);
     access->vaddr = src;
     access->size = size;
     /* multiply by 2 because it can cross page boundary */
-    if(access->max_pages == n_pages)
+    if(n_pages > access->max_pages){
+        access->max_pages = n_pages * 2;
         access->pages = realloc(access->pages, sizeof(RISCVPage) * n_pages * 2);
+    }
+
     g_assert(access->pages);
 }
 
@@ -549,7 +551,7 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
         // 2/3 is CPU
     }
 
-    stat->general.in_pim += size;
+    atomic_add(&stat->general.in_pim, size);
     return delay;
 }
 
@@ -603,9 +605,11 @@ static void rec_iteration(int level, char **row, hwaddr phys, void *host,dram_cp
     }
 }
 
+typedef void (*qemu_src_dest) (void *dest, void *src, uint64_t sz);
+
 static void rec_rr_iteration(int level, void *host_dest, void *host_src,
                           dram_cpu_info *info, uint64_t *size,
-                          void (*fn)(void *dest, void *src, uint64_t sz))
+                          qemu_src_dest fn)
 {
     uint64_t host_64, j;
 
@@ -638,11 +642,13 @@ static void rec_rr_iteration(int level, void *host_dest, void *host_src,
 
 }
 
+typedef void (*qemu_ambit) (void *dest, void *src1, void *src2, uint64_t sz);
+
 static void rec_rrr_iteration(int level, hwaddr phys_dest, void *host_dest,
                           hwaddr phys_src1, void *host_src1,
                           hwaddr phys_src2, void *host_src2,
                           dram_cpu_info *info, uint64_t *size,
-                          void (*fn)(void *dest, void *src1, void *src2, uint64_t sz))
+                          qemu_ambit fn)
 {
     uint64_t host_64, j;
 
@@ -752,11 +758,8 @@ static void r_and(void *dest, void *src1, void *src2, uint64_t sz)
     char *s2 = (char *)src2;
     char *d = (char *)dest;
 
-    for(int i=0; i < sz; i++){
-        // if(i == 0)
-        //     printf("%x & %x = %x\n", s1[i], s2[i], (s1[i]) & (s2[i]));
+    for(int i=0; i < sz; i++)
         d[i] = s1[i] & s2[i];
-    }
 }
 
 static void row_and(hwaddr src_phys1, void *src_host1, hwaddr src_phys2, void *src_host2, hwaddr dest_phys, void *dest_host, dram_cpu_info *info, uint64_t size)
@@ -771,8 +774,6 @@ static void r_or(void *dest, void *src1, void *src2, uint64_t sz)
     char *d = (char *)dest;
 
     for(int i=0; i < sz; i++){
-        // if(i == 0)
-        //     printf("%x | %x = %x\n", s1[i], s2[i], (s1[i]) | (s2[i]));
         d[i] = s1[i] | s2[i];
     }
 }
@@ -805,15 +806,133 @@ static void init_zero_row(uint64_t row_size)
         debug_printf("Byte in row is %u\n", zero_row[0]);
     }
 }
+
+static void init_3_riscv_access_once(CPURISCVState *env, target_ulong src1,
+                                     target_ulong src2,
+                                     target_ulong dest, target_ulong size)
+{
+    if(env->rc_src_access.n_pages == 0) {
+        env->rc_mmu_idx = cpu_mmu_index(env, false);
+        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
+
+        if(src1 != 0)
+            init_riscv_access(&env->rc_src_access, src1, size);
+
+        if(src2 != 0)
+            init_riscv_access(&env->rc_src2_access, src2, size);
+
+        if(dest != 0)
+            init_riscv_access(&env->rc_dest_access, dest, size);
+    }
+}
+
+static void init_2_riscv_access_once(CPURISCVState *env, target_ulong src,
+                                     target_ulong dest, target_ulong size)
+{
+    init_3_riscv_access_once(env, src, 0, dest, size);
+}
+
+static void init_riscv_access_once(CPURISCVState *env, target_ulong dest,
+                                   target_ulong size)
+{
+    init_3_riscv_access_once(env, 0, 0, dest, size);
+}
+
+static void pre_fault_dest(CPURISCVState *env, dram_cpu_info *info,
+                               uintptr_t curr_pc, rci_stats *stat)
+{
+    /* Pre-fault all dest pages once */
+    if(env->rc_faulted_all_dest == false) {
+        atomic_inc(&stat->avg_pf.sum);
+        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_dest = true;
+        atomic_dec(&stat->avg_pf.sum);
+    }
+}
+
+static void pre_fault_dest_rcc(CPURISCVState *env, dram_cpu_info *info,
+                               uintptr_t curr_pc, rcc_stats *stat)
+{
+    pre_fault_dest(env, info, curr_pc, &stat->general);
+}
+
+static void pre_fault_src_dest(CPURISCVState *env, dram_cpu_info *info,
+                               uintptr_t curr_pc, rcc_stats *stat)
+{
+    pre_fault_dest_rcc(env, info, curr_pc, stat);
+
+     /* Pre-fault all src pages once */
+    if(env->rc_faulted_all_src == false) {
+        atomic_inc(&stat->general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_src = true;
+        atomic_dec(&stat->general.avg_pf.sum);
+    }
+}
+
+static void pre_fault_src_src2_dest(CPURISCVState *env, dram_cpu_info *info,
+                                    uintptr_t curr_pc, rcc_stats *stat)
+{
+    pre_fault_src_dest(env, info, curr_pc, stat);
+
+    if(env->rc_faulted_all_src2 == false) {
+        atomic_inc(&stat->general.avg_pf.sum);
+        find_all_pages(env, &env->rc_src2_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
+        env->rc_faulted_all_src2 = true;
+        atomic_dec(&stat->general.avg_pf.sum);
+    }
+}
+
+static void gather_stats_rci(rci_stats *stat, uint64_t delay_op)
+{
+    atomic_add(&stat->avg_delay.sum, delay_op);
+#if USE_STDEV_STDERR
+    g_assert(stat->avg_delay.n < STAT_MAX_DEL_VAL);
+    stat->del_val[stat->avg_delay.n] = delay_op;
+#endif
+    atomic_inc(&stat->avg_delay.n);
+    atomic_inc(&stat->avg_pf.n);
+}
+
+static void gather_stats(rcc_stats *stat, uint64_t delay_op)
+{
+    gather_stats_rci(&stat->general, delay_op);
+}
+
+static void reset_riscv_access(CPURISCVState *env)
+{
+    del_riscv_access(&env->rc_dest_access);
+    g_assert(env->rc_faulted_all_dest);
+    env->rc_faulted_all_dest = false;
+}
+
+static void reset_2_riscv_access(CPURISCVState *env)
+{
+    reset_riscv_access(env);
+    del_riscv_access(&env->rc_src_access);
+    g_assert(env->rc_faulted_all_src);
+    env->rc_faulted_all_src = false;
+}
+
+static void reset_3_riscv_access(CPURISCVState *env)
+{
+    reset_2_riscv_access(env);
+    del_riscv_access(&env->rc_src2_access);
+    g_assert(env->rc_faulted_all_src2);
+    env->rc_faulted_all_src2 = false;
+}
+
 #endif
 
 
 // ########################## RCC ###############################
 #if !defined(CONFIG_USER_ONLY)
 static rcc_stats rcc_stat;
+static rcc_stats anot_stat;
 
-static void perform_rcc_op(partial_row_list *partial_src,
-                               partial_row_list *partial_dest)
+static void perform_src_dest_op(partial_row_list *partial_src,
+                                partial_row_list *partial_dest,
+                                qemu_src_dest fn)
 {
     partial_row *src_part, *dest_part;
     uint64_t mov_size = 0;
@@ -832,7 +951,7 @@ static void perform_rcc_op(partial_row_list *partial_src,
         mov_size = MIN(srcs, dests);
         debug_printf("Move %lu\n", mov_size);
 
-        memcpy(dest_part->host, src_part->host, mov_size);
+        fn(dest_part->host, src_part->host, mov_size);
 
         if(srcs < dests) {
             src_part = QSIMPLEQ_NEXT(src_part, next_partial);
@@ -851,10 +970,11 @@ static void perform_rcc_op(partial_row_list *partial_src,
     }
 }
 
-static uint64_t perform_rcc_delay(CPURISCVState *env,
+static uint64_t perform_src_dest_delay(CPURISCVState *env,
                                   row_data_list *row_src,
                                   row_data_list *row_dest,
-                                  dram_cpu_info *info)
+                                  dram_cpu_info *info,
+                                  rcc_stats *stat)
 {
     row_data *src_row, *dest_row;
     uint64_t mov_size = 0, increment = 0;
@@ -875,7 +995,7 @@ static uint64_t perform_rcc_delay(CPURISCVState *env,
            src_row->usage == row_size) {
 
             /* maybe now we can think about PIM */
-            delay = fpm_psm_delay(env, row_size, src_row->addr, dest_row->addr, &rcc_stat);
+            delay = fpm_psm_delay(env, row_size, src_row->addr, dest_row->addr, stat);
 
         } else {
             /* here we can have src and/or dest not full,
@@ -917,22 +1037,14 @@ static uint64_t perform_rcc_delay(CPURISCVState *env,
 
     return delay_op;
 }
-#endif
 
-void helper_rcc(CPURISCVState *env, target_ulong src,
-                        target_ulong dest, target_ulong size)
+static void helper_src_dest(CPURISCVState *env, target_ulong src,
+                            target_ulong dest, target_ulong size,
+                            uintptr_t curr_pc, rcc_stats *stat,
+                            qemu_src_dest fn)
 {
     if(size == 0)
         return;
-
-#if defined(CONFIG_USER_ONLY)
-    void *src_addr;
-    void *dest_addr;
-
-    src_addr = g2h(src);
-    dest_addr = g2h(dest);
-    memcpy(dest_addr, src_addr, size);
-#else
 
     dram_cpu_info *info;
     row_data_list row_src, row_dest;
@@ -940,66 +1052,259 @@ void helper_rcc(CPURISCVState *env, target_ulong src,
     uint64_t delay_op = 0;
 
     /* Only init once */
-    if(env->rc_src_access.n_pages == 0) {
-        env->rc_mmu_idx = cpu_mmu_index(env, false);
-        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
-
-        init_riscv_access(&env->rc_src_access, src, size);
-        init_riscv_access(&env->rc_dest_access, dest, size);
-    }
-
+    init_2_riscv_access_once(env, src, dest, size);
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    
-    /* Pre-fault all src pages once */
-    if(env->rc_faulted_all_src == false) {
-        atomic_inc(&rcc_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, GETPC());
-        env->rc_faulted_all_src = true;
-    }
-
-    /* Pre-fault all dest pages once */
-    if(env->rc_faulted_all_dest == false) {
-        atomic_inc(&rcc_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
-        env->rc_faulted_all_dest = true;
-    }
+    pre_fault_src_dest(env, info, curr_pc, stat);
 
     init_rowlist(env, info, &env->rc_src_access, &row_src, &partial_src);
     init_rowlist(env, info, &env->rc_dest_access, &row_dest, &partial_dest);
 
-    atomic_add(&rcc_stat.general.tot_bytes, size);
+    atomic_add(&stat->general.tot_bytes, size);
 
     /* Core operation, perform the actual copy */
-    perform_rcc_op(&partial_src, &partial_dest);
-    delay_op = perform_rcc_delay(env, &row_src, &row_dest, info);
+    perform_src_dest_op(&partial_src, &partial_dest, fn);
+    delay_op = perform_src_dest_delay(env, &row_src, &row_dest, info, stat);
 
     /* Final stats bookeeping and cleanup */
-    atomic_add(&rcc_stat.general.avg_delay.sum, delay_op);
-#if USE_STDEV_STDERR
-    g_assert(rcc_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
-    rcc_stat.general.del_val[rcc_stat.general.avg_delay.n] = delay_op;
-#endif
-    atomic_inc(&rcc_stat.general.avg_delay.n);
-    atomic_sub(&rcc_stat.general.avg_pf.sum, 2);
-    atomic_inc(&rcc_stat.general.avg_pf.n);
+    gather_stats(stat, delay_op);
 
     del_rowlist(&row_src);
     del_rowlist(&row_dest);
     del_partiallist(&partial_src);
     del_partiallist(&partial_dest);
-    del_riscv_access(&env->rc_src_access);
-    del_riscv_access(&env->rc_dest_access);
 
-    env->rc_faulted_all_dest = false;
-    env->rc_faulted_all_src = false;
+    reset_2_riscv_access(env);
     debug_printf("#######################\n");
+}
 
+#endif
+
+void helper_rcc(CPURISCVState *env, target_ulong src,
+                target_ulong dest, target_ulong size)
+{
+#if !defined(CONFIG_USER_ONLY)
+    helper_src_dest(env, src, dest, size, GETPC(), &rcc_stat, r_cp);
 #endif
 }
 
+void helper_anot(CPURISCVState *env, target_ulong src,
+                target_ulong dest, target_ulong size)
+{
+#if !defined(CONFIG_USER_ONLY)
+    helper_src_dest(env, src, dest, size, GETPC(), &anot_stat, r_not);
+#endif
+}
+
+// ########################## AAND/AOR ###############################
+#if !defined(CONFIG_USER_ONLY)
+static rcc_stats aand_stat;
+static rcc_stats aor_stat;
+
+static void perform_ambit_op(partial_row_list *partial_src1,
+                             partial_row_list *partial_src2,
+                             partial_row_list *partial_dest,
+                             qemu_ambit fn)
+{
+    partial_row *src_part1, *src_part2, *dest_part;
+    uint64_t mov_size = 0;
+    uint64_t srcs1, srcs2, dests;
+
+    src_part1 = QSIMPLEQ_FIRST(partial_src1);
+    src_part2 = QSIMPLEQ_FIRST(partial_src2);
+    dest_part = QSIMPLEQ_FIRST(partial_dest);
+
+    while(src_part1 && src_part2 && dest_part) {
+        srcs1 = src_part1->size;
+        srcs2 = src_part2->size;
+        dests = dest_part->size;
+
+        debug_printf("PART Src1 row %lx size %lu host %p\n", src_part1->start, src_part1->size, src_part1->host);
+        debug_printf("PART Src2 row %lx size %lu host %p\n", src_part2->start, src_part2->size, src_part2->host);
+        debug_printf("PART Dest row %lx size %lu host %p\n", dest_part->start, dest_part->size, dest_part->host);
+
+        mov_size = MIN(srcs1, dests);
+        mov_size = MIN(srcs2, mov_size);
+        debug_printf("Move %lu\n", mov_size);
+
+        fn(dest_part->host, src_part1->host, src_part2->host, mov_size);
+
+        if(srcs1 == mov_size) {
+            src_part1 = QSIMPLEQ_NEXT(src_part1, next_partial);
+        } else {
+            src_part1->size -= mov_size;
+            src_part1->start += mov_size;
+            src_part1->host = (void *) ((uint64_t) src_part1->host + mov_size);
+        }
+
+        if(srcs2 == mov_size) {
+            src_part2 = QSIMPLEQ_NEXT(src_part2, next_partial);
+        } else {
+            src_part2->size -= mov_size;
+            src_part2->start += mov_size;
+            src_part2->host = (void *) ((uint64_t) src_part2->host + mov_size);
+        }
+
+        if(dests == mov_size) {
+            dest_part = QSIMPLEQ_NEXT(dest_part, next_partial);
+        } else {
+            dest_part->size -= mov_size;
+            dest_part->start += mov_size;
+            dest_part->host = (void *) ((uint64_t) dest_part->host + mov_size);
+        }
+    }
+}
+
+static uint64_t perform_ambit_delay(CPURISCVState *env,
+                                  row_data_list *row_src1,
+                                  row_data_list *row_src2,
+                                  row_data_list *row_dest,
+                                  rcc_stats *stat,
+                                  dram_cpu_info *info)
+{
+    row_data *src_row1, *src_row2, *dest_row;
+    uint64_t mov_size = 0, increment = 0;
+    uint64_t delay_op = 0, delay = 0;
+    uint64_t row_size;
+
+    row_size = info->col.size;
+    src_row1 = QSIMPLEQ_FIRST(row_src1);
+    src_row2 = QSIMPLEQ_FIRST(row_src2);
+    dest_row = QSIMPLEQ_FIRST(row_dest);
+
+    while(src_row1 && src_row2 && dest_row) {
+
+        debug_printf("Src row %lx size %lu\n", src_row1->addr, src_row1->usage);
+        debug_printf("Src row %lx size %lu\n", src_row2->addr, src_row2->usage);
+        debug_printf("Dest row %lx size %lu\n", dest_row->addr,
+                                                dest_row->usage);
+
+        if(src_row1->usage == dest_row->usage &&
+           src_row2->usage == dest_row->usage &&
+           dest_row->usage == row_size) {
+
+            /* maybe now we can think about PIM */
+            delay = tri_fpm_psm_delay(env, row_size, src_row1->addr, src_row2->addr, dest_row->addr, stat);
+
+            mov_size = row_size;
+
+        } else {
+            /* here we can have src1/2 and/or dest not full,
+             or full but with different number of pieces inside */
+
+            mov_size = MIN(src_row1->usage, dest_row->usage);
+            mov_size = MIN(src_row2->usage, mov_size);
+            increment = get_increment_row_address(mov_size, info);
+
+            debug_printf("Uneven rows, copy only a piece %lu\n", mov_size);
+            delay = CPU_DELAY(mov_size);
+        }
+
+        slow_down_by(env, delay);
+        delay_op += delay;
+
+        if(src_row1->usage == mov_size){
+            src_row1 = QSIMPLEQ_NEXT(src_row1, next_row);
+        } else {
+            src_row1->usage -= mov_size;
+            src_row1->addr += increment;
+            src_row1->host = (void *) ((uint64_t) src_row1->host + increment);
+        }
+
+        if(src_row2->usage == mov_size){
+            src_row2 = QSIMPLEQ_NEXT(src_row2, next_row);
+        } else {
+            src_row2->usage -= mov_size;
+            src_row2->addr += increment;
+            src_row2->host = (void *) ((uint64_t) src_row2->host + increment);
+        }
+
+        if(dest_row->usage == mov_size){
+            dest_row = QSIMPLEQ_NEXT(dest_row, next_row);
+        } else {
+            dest_row->usage -= mov_size;
+            dest_row->addr += increment;
+            dest_row->host = (void *) ((uint64_t) dest_row->host + increment);
+        }
+
+    }
+
+    return delay_op;
+}
+
+static void helper_ambit(CPURISCVState *env, target_ulong src1,
+                  target_ulong src2,
+                  target_ulong dest, target_ulong size,
+                  rcc_stats *stat, uintptr_t curr_pc, qemu_ambit fn)
+{
+    if(size == 0)
+        return;
+
+    dram_cpu_info *info;
+    row_data_list row_src1, row_src2, row_dest;
+    partial_row_list partial_src1, partial_src2, partial_dest;
+    uint64_t delay_op = 0;
+
+    /* Only init once */
+    init_3_riscv_access_once(env, src1, src2, dest, size);
+    info =  &(RISCV_CPU(env_cpu(env))->dram_info);
+
+    // printf("init done\n");
+    /* Page fault if needed, but find all pages. Code until here
+     * can re-executed becauses find_all_pages triggers a pf. */
+    pre_fault_src_src2_dest(env, info, curr_pc, stat);
+
+    // printf("prefault done\n");
+
+    init_rowlist(env, info, &env->rc_src_access, &row_src1, &partial_src1);
+    init_rowlist(env, info, &env->rc_src2_access, &row_src2, &partial_src2);
+    init_rowlist(env, info, &env->rc_dest_access, &row_dest, &partial_dest);
+
+    atomic_add(&stat->general.tot_bytes, size);
+
+    /* Core operation, perform the actual copy */
+    perform_ambit_op(&partial_src1, &partial_src2, &partial_dest, fn);
+    // printf("op done\n");
+
+    delay_op = perform_ambit_delay(env, &row_src1, &row_src2, &row_dest, stat, info);
+    // printf("delay done\n");
+
+    /* Final stats bookeeping and cleanup */
+    gather_stats(stat, delay_op);
+    // printf("stat done\n");
+
+    del_rowlist(&row_src1);
+    del_rowlist(&row_src2);
+    del_rowlist(&row_dest);
+    del_partiallist(&partial_src1);
+    del_partiallist(&partial_src2);
+    del_partiallist(&partial_dest);
+    // printf("del done\n");
+
+    reset_3_riscv_access(env);
+    // printf("reset done\n");
+
+    debug_printf("#######################\n");
+}
+#endif
+
+void helper_aand(CPURISCVState *env, target_ulong src1, target_ulong src2,
+                  target_ulong dest, target_ulong size)
+{
+#if !defined(CONFIG_USER_ONLY)
+    helper_ambit(env, src1, src2, dest, size, &aand_stat, GETPC(), r_and);
+#endif
+}
+
+void helper_aor(CPURISCVState *env, target_ulong src1, target_ulong src2,
+                  target_ulong dest, target_ulong size)
+{
+#if !defined(CONFIG_USER_ONLY)
+    helper_ambit(env, src1, src2, dest, size, &aor_stat, GETPC(), r_or);
+#endif
+}
 
 // ########################## RCI ###############################
 #if !defined(CONFIG_USER_ONLY)
@@ -1049,7 +1354,7 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
 
 #if 0
 // control commit on dec 10
-static uint64_t perform_rci_missed(CPURISCVState *env)
+static uint64_t perform_rci_missed(CPURISCVState *env, uintptr_t curr_pc)
 {
     uint64_t delay_op = 0;
 
@@ -1061,21 +1366,14 @@ static uint64_t perform_rci_missed(CPURISCVState *env)
 
         /* No luck, do it manually */
         for (int j = 0; j < env->rc_src_access.pages[rci_missed[i]].size; j++) {
-            helper_ret_stb_mmu(env, env->rc_src_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, env->rc_oi, GETPC());
+            helper_ret_stb_mmu(env, env->rc_src_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, env->rc_oi, curr_pc);
         }
     }
 
     return delay_op;
 }
 #endif
-#else 
 
-static void perform_rci_user(target_ulong dest, target_ulong size)
-{
-    void *dest_addr;
-    dest_addr = g2h(dest);
-    memset(dest_addr, MEMSET_BYTE, size);
-}
 #endif
 
 void helper_rci(CPURISCVState *env, target_ulong dest,
@@ -1084,10 +1382,7 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     if(size == 0)
         return;
 
-#if defined(CONFIG_USER_ONLY)
-    /* User: no MMU, just copy the data from one side to the other */
-    perform_rci_user(dest, size);
-#else
+#if !defined(CONFIG_USER_ONLY)
     /*
      * System: MMU, make sure to get the correct pages (host addresses)
      * via the TLB, and load missing pages if needed.
@@ -1099,19 +1394,13 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     uint64_t delay_op;
 
     /* Only init once */
-    if(env->rc_src_access.n_pages == 0) {
-        env->rc_mmu_idx = cpu_mmu_index(env, false);
-        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
-        init_riscv_access(&env->rc_src_access, dest, size);
-    }
-
+    init_riscv_access_once(env, dest, size);
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
     row_size = info->col.size;
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    atomic_inc(&rci_stat.avg_pf.sum);
-    find_all_pages(env, &env->rc_src_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
+    pre_fault_dest(env, info, GETPC(), &rci_stat);
 
     /* pre-init the zero rowbuffer*/
     init_zero_row(row_size);
@@ -1120,26 +1409,18 @@ void helper_rci(CPURISCVState *env, target_ulong dest,
     atomic_add(&rci_stat.tot_bytes, size);
 
     /* parse pages in row and partial rows */
-    init_rowlist(env, info, &env->rc_src_access, &rows, &partial_rows);
+    init_rowlist(env, info, &env->rc_dest_access, &rows, &partial_rows);
 
     /* Core operation, perform the actual memset */
     delay_op = perform_rci(env, &rows, info);
 
     /* Final stats, and cleanup */
-    atomic_add(&rci_stat.avg_delay.sum, delay_op);
-
-#if USE_STDEV_STDERR
-    g_assert(rci_stat.avg_delay.n < STAT_MAX_DEL_VAL);
-    rci_stat.del_val[rci_stat.avg_delay.n] = delay_op;
-#endif
-    atomic_inc(&rci_stat.avg_delay.n);
-    atomic_dec(&rci_stat.avg_pf.sum);
-    atomic_inc(&rci_stat.avg_pf.n);
+    gather_stats_rci(&rci_stat, delay_op);
 
     del_rowlist(&rows);
     del_partiallist(&partial_rows);
-    del_riscv_access(&env->rc_src_access);
 
+    reset_riscv_access(env);
     debug_printf("#######################\n");
 #endif
 }
@@ -1167,32 +1448,23 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
     info =  &(RISCV_CPU(env_cpu(env))->dram_info);
 
     /* Only init once */
-    if(env->rc_src_access.n_pages == 0) {
-        // printf("RCIK request\n");
-        env->rc_mmu_idx = cpu_mmu_index(env, false);
-        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
-        init_riscv_access(&env->rc_src_access, row_dest, get_msb(info->col.mask));
-    }
-
+    init_riscv_access_once(env, row_dest, get_msb(info->col.mask));
     row_size = info->col.size;
     init_zero_row(row_size);
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-    atomic_inc(&rcik_stat.avg_pf.sum);
-    // env->rc_src_access.size = 1;
-
-    find_all_pages(env, &env->rc_src_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, GETPC());
-    // printf("Phys addr %lx, Vaddr %lx\n", env->rc_src_access.pages[0].phys_addr, (uint64_t) env->rc_src_access.pages[0].v_addr);
+    pre_fault_dest(env, info, GETPC(), &rcik_stat);
+    // printf("Phys addr %lx, Vaddr %lx\n", env->rc_dest_access.pages[0].phys_addr, (uint64_t) env->rc_dest_access.pages[0].v_addr);
 
     // if the row is unaligned, error. Keep the instrucion as simple as poss
-    offset_row = env->rc_src_access.pages[0].phys_addr & info->col.mask;
+    offset_row = env->rc_dest_access.pages[0].phys_addr & info->col.mask;
     g_assert(offset_row == 0);
 
     /* Stats bookeeping */
     atomic_add(&rcik_stat.tot_bytes, row_size);
 
-    set_to_row(zero_row, env->rc_src_access.pages[0].phys_addr, env->rc_src_access.pages[0].host_addr, info, row_size);
+    set_to_row(zero_row, env->rc_dest_access.pages[0].phys_addr, env->rc_dest_access.pages[0].host_addr, info, row_size);
 
     // printf("Full size, full speed\n");
     delay = FPM_DELAY(row_size);
@@ -1201,17 +1473,9 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
     slow_down_by(env, delay);
 
     /* Final stats, and cleanup */
-    atomic_add(&rcik_stat.avg_delay.sum, delay);
+    gather_stats_rci(&rcik_stat, delay);
 
-#if USE_STDEV_STDERR
-    g_assert(rcik_stat.avg_delay.n < STAT_MAX_DEL_VAL);
-    rcik_stat.del_val[rcik_stat.avg_delay.n] = delay;
-#endif
-    atomic_inc(&rcik_stat.avg_delay.n);
-    atomic_dec(&rcik_stat.avg_pf.sum);
-    atomic_inc(&rcik_stat.avg_pf.n);
-
-    del_riscv_access(&env->rc_src_access);
+    reset_riscv_access(env);
 #endif
 }
 
@@ -1219,8 +1483,9 @@ void helper_rcik(CPURISCVState *env, target_ulong row_dest)
 // ########################## RCCK / ANOTK ###############################
 #if !defined(CONFIG_USER_ONLY)
 static rcc_stats rcck_stat;
+static rcc_stats anotk_stat;
 
-static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong dest, uintptr_t curr_pc, row_src_dest row_fn)
+static void helper_src_destk(CPURISCVState *env, target_ulong src, target_ulong dest, uintptr_t curr_pc, row_src_dest row_fn, rcc_stats *stat)
 {
     if (!(env->priv >= PRV_S)) {
         riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, curr_pc);
@@ -1234,36 +1499,12 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
     row_size = info->col.size;
 
     /* Only init once */
-    if(env->rc_src_access.n_pages == 0) {
-        // printf("###############\nRCCK request %lx %lx\n", (uint64_t) src, (uint64_t) dest);
-        env->rc_mmu_idx = cpu_mmu_index(env, false);
-        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
-
-        init_riscv_access(&env->rc_src_access, src, get_msb(info->col.mask));
-        init_riscv_access(&env->rc_dest_access, dest, get_msb(info->col.mask));
-
-        // env->rc_src_access.size = 1;
-        // env->rc_dest_access.size = 1;
-    }
+    init_2_riscv_access_once(env, src, dest, get_msb(info->col.mask));
 
     /* Page fault if needed, but find all pages. Code until here
      * can re-executed becauses find_all_pages triggers a pf. */
-
-    /* Pre-fault all src pages once */
-    if(env->rc_faulted_all_src == false) {
-        atomic_inc(&rcck_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
-        env->rc_faulted_all_src = true;
-    }
-
-    /* Pre-fault all dest pages once */
-    if(env->rc_faulted_all_dest == false) {
-        atomic_inc(&rcck_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
-        env->rc_faulted_all_dest = true;
-    }
-
-    atomic_add(&rcck_stat.general.tot_bytes, row_size);
+    pre_fault_src_dest(env, info, curr_pc, stat);
+    atomic_add(&stat->general.tot_bytes, row_size);
 
     hwaddr phys_src = env->rc_src_access.pages[0].phys_addr;
     hwaddr phys_dest = env->rc_dest_access.pages[0].phys_addr;
@@ -1281,25 +1522,12 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
             env->rc_dest_access.pages[0].host_addr, info, row_size);
 
     /* Calculate the actual delay */
-    delay_op = fpm_psm_delay(env, row_size, phys_src, phys_dest, &rcck_stat);
+    delay_op = fpm_psm_delay(env, row_size, phys_src, phys_dest, stat);
 
     /* Final stats bookeeping and cleanup */
-    atomic_add(&rcck_stat.general.avg_delay.sum, delay_op);
+    gather_stats(stat, delay_op);
 
-#if USE_STDEV_STDERR
-    g_assert(rcck_stat.general.avg_delay.n < STAT_MAX_DEL_VAL);
-    rcck_stat.general.del_val[rcck_stat.general.avg_delay.n] = delay_op;
-#endif
-
-    atomic_inc(&rcck_stat.general.avg_delay.n);
-    atomic_sub(&rcck_stat.general.avg_pf.sum, 2);
-    atomic_inc(&rcck_stat.general.avg_pf.n);
-
-    del_riscv_access(&env->rc_src_access);
-    del_riscv_access(&env->rc_dest_access);
-
-    env->rc_faulted_all_dest = false;
-    env->rc_faulted_all_src = false;
+    reset_2_riscv_access(env);
     debug_printf("#######################\n");
 }
 #endif
@@ -1307,7 +1535,7 @@ static void helper_src_dest(CPURISCVState *env, target_ulong src, target_ulong d
 void helper_rcck(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
-    helper_src_dest(env, src, dest, GETPC(), row_memcpy);
+    helper_src_destk(env, src, dest, GETPC(), row_memcpy, &rcck_stat);
 #endif
 }
 
@@ -1315,15 +1543,16 @@ void helper_anotk(CPURISCVState *env, target_ulong src, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
     // printf("helper_anot\n");
-    helper_src_dest(env, src, dest, GETPC(), row_not);
+    helper_src_destk(env, src, dest, GETPC(), row_not, &anotk_stat);
 #endif
 }
 
 // ########################## AMBIT ORK/ANDK ###############################
 #if !defined(CONFIG_USER_ONLY)
-static rcc_stats ambit_stat;
+static rcc_stats aandk_stat;
+static rcc_stats aork_stat;
 
-static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest, uintptr_t curr_pc, row_ambit row_fn)
+static void helper_ambitk(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest, uintptr_t curr_pc, row_ambit row_fn, rcc_stats *stat)
 {
     if (!(env->priv >= PRV_S)) {
         riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, curr_pc);
@@ -1337,43 +1566,10 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
     row_size = info->col.size;
 
     /* Only init once */
-    if(env->rc_src_access.n_pages == 0) {
-        env->rc_mmu_idx = cpu_mmu_index(env, false);
-        env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
+    init_3_riscv_access_once(env, src1, src2, dest, get_msb(info->col.mask));
 
-        init_riscv_access(&env->rc_src_access, src1, get_msb(info->col.mask));
-        init_riscv_access(&env->rc_src2_access, src2, get_msb(info->col.mask));
-        init_riscv_access(&env->rc_dest_access, dest, get_msb(info->col.mask));
-
-        // env->rc_src_access.size = 1;
-        // env->rc_src2_access.size = 1;
-        // env->rc_dest_access.size = 1;
-    }
-
-    /* Page fault if needed, but find all pages. Code until here
-     * can re-executed becauses find_all_pages triggers a pf. */
-
-    /* Pre-fault all src pages once */
-    if(env->rc_faulted_all_src == false) {
-        atomic_inc(&ambit_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_src_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
-        env->rc_faulted_all_src = true;
-    }
-
-    if(env->rc_faulted_all_src2 == false) {
-        atomic_inc(&ambit_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_src2_access, MMU_DATA_LOAD, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
-        env->rc_faulted_all_src2 = true;
-    }
-
-    /* Pre-fault all dest pages once */
-    if(env->rc_faulted_all_dest == false) {
-        atomic_inc(&ambit_stat.general.avg_pf.sum);
-        find_all_pages(env, &env->rc_dest_access, MMU_DATA_STORE, info, env->rc_mmu_idx, env->rc_oi, curr_pc);
-        env->rc_faulted_all_dest = true;
-    }
-
-    atomic_add(&ambit_stat.general.tot_bytes, row_size);
+    pre_fault_src_src2_dest(env, info, curr_pc, stat);
+    atomic_add(&stat->general.tot_bytes, row_size);
 
     hwaddr phys_src1 = env->rc_src_access.pages[0].phys_addr;
     hwaddr phys_src2 = env->rc_src2_access.pages[0].phys_addr;
@@ -1397,26 +1593,12 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
            env->rc_dest_access.pages[0].host_addr, info, row_size);
 
     /* Calculate the actual delay */
-    delay_op = tri_fpm_psm_delay(env, row_size, phys_src1, phys_src2, phys_dest, &ambit_stat);
+    delay_op = tri_fpm_psm_delay(env, row_size, phys_src1, phys_src2, phys_dest, stat);
 
     /* Final stats bookeeping and cleanup */
-    atomic_add(&ambit_stat.general.avg_delay.sum, delay_op);
+    gather_stats(stat, delay_op);
 
-#if USE_STDEV_STDERR
-    g_assert(ambit_stat.general.avg_delay.nATOM < STAT_MAX_DEL_VAL);
-    ambit_stat.general.del_val[ambit_stat.general.avg_delay.nATOM] = delay_op;
-#endif
-    atomic_inc(&ambit_stat.general.avg_delay.n);
-    atomic_sub(&ambit_stat.general.avg_pf.sum, 3);
-    atomic_inc(&ambit_stat.general.avg_pf.n);
-
-    del_riscv_access(&env->rc_src_access);
-    del_riscv_access(&env->rc_src2_access);
-    del_riscv_access(&env->rc_dest_access);
-
-    env->rc_faulted_all_dest = false;
-    env->rc_faulted_all_src = false;
-    env->rc_faulted_all_src2 = false;
+    reset_3_riscv_access(env);
     debug_printf("#######################\n");
 }
 
@@ -1425,14 +1607,14 @@ static void helper_ambit(CPURISCVState *env, target_ulong src1, target_ulong src
 void helper_aandk(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
-    helper_ambit(env, src1, src2, dest, GETPC(), row_and);
+    helper_ambitk(env, src1, src2, dest, GETPC(), row_and, &aandk_stat);
 #endif
 }
 
 void helper_aork(CPURISCVState *env, target_ulong src1, target_ulong src2, target_ulong dest)
 {
 #if !defined(CONFIG_USER_ONLY)
-    helper_ambit(env, src1, src2, dest, GETPC(), row_or);
+    helper_ambitk(env, src1, src2, dest, GETPC(), row_or, &aork_stat);
 #endif
 }
 
@@ -1475,11 +1657,8 @@ static double calc_stderr(double stddev, int n)
 }
 #endif /* USE_STDEV_STDERR */
 
-#endif
-
 static void helper_rci_stat(CPURISCVState *env, bool k)
 {
-#if !defined(CONFIG_USER_ONLY)
     const char *name = "RCI";
     const char *name2 = "RCIK";
     double stddev = 0, stdderr = 0;
@@ -1516,21 +1695,12 @@ static void helper_rci_stat(CPURISCVState *env, bool k)
         );
 
     memset(stat, 0, sizeof(rci_stats));
-#endif
 }
 
-static void helper_rcc_stat(CPURISCVState *env, bool k)
+static void helper_rcc_stat(CPURISCVState *env, rcc_stats *stat,
+                            const char *name)
 {
-#if !defined(CONFIG_USER_ONLY)
-    const char *name = "RCC";
-    const char *name2 = "RCCK";
     double stddev = 0, stdderr = 0;
-    rcc_stats *stat = &rcc_stat;
-
-    if(k){
-        name = name2;
-        stat = &rcck_stat;
-    }
 
 #if USE_STDEV_STDERR
     stddev = calc_stddev(stat->general.avg_delay.sum, stat->general.del_val, stat->general.avg_delay.n);
@@ -1563,12 +1733,12 @@ static void helper_rcc_stat(CPURISCVState *env, bool k)
         stddev, stdderr);
 
     memset(stat, 0, sizeof(rcc_stats));
-#endif
 }
+#endif
 
 void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
 {
-
+#if !defined(CONFIG_USER_ONLY)
     // printf("Name %lx Val %ld\n", (uint64_t) name, (uint64_t) val);
     void *name_host = tlb_vaddr_to_host(env, name, MMU_DATA_LOAD, cpu_mmu_index(env, false));
     printf("#################################\n");
@@ -1582,19 +1752,38 @@ void helper_stat(CPURISCVState *env, target_ulong val, target_ulong name)
         helper_rci_stat(env, false);
         break;
     case 1:
-        helper_rcc_stat(env, false);
+        helper_rcc_stat(env, &rcc_stat, "RCC");
         break;
     case 2:
-        helper_rci_stat(env, true);
+        helper_rcc_stat(env, &aand_stat, "AAND");
         break;
     case 3:
-        helper_rcc_stat(env, true);
+        helper_rcc_stat(env, &aor_stat, "AOR");
+        break;
+    case 4:
+        helper_rcc_stat(env, &anot_stat, "ANOT");
+        break;
+    case 5:
+        helper_rci_stat(env, true);
+        break;
+    case 6:
+        helper_rcc_stat(env, &rcck_stat, "RCCK");
+        break;
+    case 7:
+        helper_rcc_stat(env, &aandk_stat, "AANDK");
+        break;
+    case 8:
+        helper_rcc_stat(env, &aork_stat, "AORK");
+        break;
+    case 9:
+        helper_rcc_stat(env, &anotk_stat, "ANOTK");
         break;
     
     default:
         printf("helper_stat: Command %ld not recognized!\n",(uint64_t) val);
         break;
     }
+#endif
 }
 
 #if !defined(CONFIG_USER_ONLY)
@@ -1606,18 +1795,11 @@ static void helper_stat_i(target_ulong val)
     atomic_inc(&rcik_stat.avg_delay.n);
 }
 
-static void helper_stat_c(target_ulong val)
+static void helper_stat_c(target_ulong val, rcc_stats *stat)
 {
-    atomic_add(&rcck_stat.general.tot_bytes, val);
-    atomic_add(&rcck_stat.general.avg_delay.sum, CPU_DELAY(val));
-    atomic_inc(&rcck_stat.general.avg_delay.n);
-}
-
-static void helper_stat_a(target_ulong val)
-{
-    atomic_add(&ambit_stat.general.tot_bytes, val);
-    atomic_add(&ambit_stat.general.avg_delay.sum, CPU_DELAY(val));
-    atomic_inc(&ambit_stat.general.avg_delay.n);
+    atomic_add(&stat->general.tot_bytes, val);
+    atomic_add(&stat->general.avg_delay.sum, CPU_DELAY(val));
+    atomic_inc(&stat->general.avg_delay.n);
 }
 #endif
 
@@ -1629,10 +1811,16 @@ void helper_incr_cpu(target_ulong val, target_ulong op)
             helper_stat_i(val);
             break;
         case 1:
-            helper_stat_c(val);
+            helper_stat_c(val, &rcck_stat);
             break;
         case 2:
-            helper_stat_a(val);
+            helper_stat_c(val, &aandk_stat);
+            break;
+        case 3:
+            helper_stat_c(val, &aork_stat);
+            break;
+        case 4:
+            helper_stat_c(val, &anotk_stat);
             break;
     }
 #endif

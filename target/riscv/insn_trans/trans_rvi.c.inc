@@ -166,7 +166,7 @@ static bool trans_lw(DisasContext *ctx, arg_lw *a)
     return gen_load(ctx, a, MO_TESL);
 }
 
-static bool gen_rcc(DisasContext *ctx, arg_rcc *a)
+static bool gen_src_dest(DisasContext *ctx, bool rcc, arg_rcc *a)
 {
     // printf("rcc src:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rd);
 
@@ -178,8 +178,10 @@ static bool gen_rcc(DisasContext *ctx, arg_rcc *a)
     gen_get_gpr(dest, a->rs2);
     gen_get_gpr(size, a->rd);
 
-    gen_helper_rcc(cpu_env, src, dest, size);
-    gen_set_gpr(a->rd, size);
+    if(rcc)
+        gen_helper_rcc(cpu_env, src, dest, size);
+    else
+        gen_helper_anot(cpu_env, src, dest, size);
 
     tcg_temp_free(src);
     tcg_temp_free(dest);
@@ -190,7 +192,48 @@ static bool gen_rcc(DisasContext *ctx, arg_rcc *a)
 
 static bool trans_rcc(DisasContext *ctx, arg_rcc *a)
 {
-    return gen_rcc(ctx, a);
+    return gen_src_dest(ctx, true, a);
+}
+
+static bool trans_anot(DisasContext *ctx, arg_anot *a)
+{
+    return gen_src_dest(ctx, false, a);
+}
+
+static bool gen_ambit(DisasContext *ctx, bool aor, arg_aor *a)
+{
+    // printf("ambit src1:%d src2:%d dest:%d size:%d\n", a->rs1, a->rs2, a->rs3, a->rd);
+
+    TCGv src1 = tcg_temp_new();
+    TCGv src2 = tcg_temp_new();
+    TCGv size = tcg_temp_new();
+    TCGv dest = tcg_temp_new();
+
+    gen_get_gpr(src1, a->rs1);
+    gen_get_gpr(src2, a->rs2);
+    gen_get_gpr(dest, a->rs3);
+    gen_get_gpr(size, a->rd);
+
+    if(aor)
+        gen_helper_aor(cpu_env, src1, src2, dest, size);
+    else
+        gen_helper_aand(cpu_env, src1, src2, dest, size);
+
+    tcg_temp_free(src1);
+    tcg_temp_free(src2);
+    tcg_temp_free(size);
+    tcg_temp_free(dest);
+    return true;
+}
+
+static bool trans_aand(DisasContext *ctx, arg_aand *a)
+{
+    return gen_ambit(ctx, false, a);
+}
+
+static bool trans_aor(DisasContext *ctx, arg_aor *a)
+{
+    return gen_ambit(ctx, true, a);
 }
 
 static bool gen_rci(DisasContext *ctx, arg_rci *a)

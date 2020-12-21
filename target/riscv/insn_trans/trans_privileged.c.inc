@@ -97,7 +97,7 @@ static bool trans_rcik(DisasContext *ctx, arg_rcik *a)
 #endif
 }
 
-static bool gen_src_dest(DisasContext *ctx, arg_rcck *a, bool rcck)
+static bool gen_src_destk(DisasContext *ctx, arg_rcck *a, bool rcck)
 {
 #ifndef CONFIG_USER_ONLY
     TCGv src = tcg_temp_new();
@@ -121,12 +121,12 @@ static bool gen_src_dest(DisasContext *ctx, arg_rcck *a, bool rcck)
 
 static bool trans_rcck(DisasContext *ctx, arg_rcck *a)
 {
-    return gen_src_dest(ctx, a, true);
+    return gen_src_destk(ctx, a, true);
 }
 
 static bool trans_anotk(DisasContext *ctx, arg_rcck *a)
 {
-    return gen_src_dest(ctx, a, false);
+    return gen_src_destk(ctx, a, false);
 }
 
 static bool gen_ambitk(DisasContext *ctx, arg_aork *a, bool or)

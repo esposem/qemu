@@ -544,11 +544,6 @@ static void riscv_cpu_init(Object *obj)
     env->rc_faulted_all_src = false;
     env->rc_faulted_all_src2 = false;
     env->rc_faulted_all_dest = false;
-    memset(&env->rcc_stat, 0, sizeof(rcc_stats));
-    memset(&env->rci_stat, 0, sizeof(rci_stats));
-    memset(&env->rcik_stat, 0, sizeof(rci_stats));
-    memset(&env->rcck_stat, 0, sizeof(rcc_stats));
-    memset(&env->ambit_stat, 0, sizeof(rcc_stats));
 
     qemu_mutex_init(&env->op_mutex);
 
