@@ -93,14 +93,15 @@ static void init_riscv_access(RISCVAccess *access, target_ulong src, target_ulon
 {
     uint64_t n_pages;
 
+    /* add 1 because it can cross page boundary */
     n_pages = (size / TARGET_PAGE_SIZE) + 1;
-    access->n_pages = n_pages;
+    n_pages *= 2; // *2 because pages non contiguous
+    access->n_pages = 1; // non-zero, just to say "it has been init"
     access->vaddr = src;
     access->size = size;
-    /* multiply by 2 because it can cross page boundary */
     if(n_pages > access->max_pages){
-        access->max_pages = n_pages * 2;
-        access->pages = realloc(access->pages, sizeof(RISCVPage) * n_pages * 2);
+        access->max_pages = n_pages;
+        access->pages = realloc(access->pages, sizeof(RISCVPage) * n_pages);
     }
 
     g_assert(access->pages);
@@ -333,7 +334,7 @@ static uint32_t find_all_pages(CPURISCVState *env, RISCVAccess *access,
         env->found_size -= sz;
         env->found_addr += sz;
 
-        g_assert(env->found_index <= (access->n_pages * 2));
+        g_assert(env->found_index <= access->max_pages);
     }
 
     debug_printf("################\n");
@@ -445,9 +446,9 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
     hwaddr rcd = chand | (get_el_value(&info->rank, dest) * sz);
     sz *= info->rank.size;
 
-    hwaddr banks1 = rcs1 | (get_el_value(&info->bank, start1 * sz));
-    hwaddr banks2 = rcs2 | (get_el_value(&info->bank, start2 * sz));
-    hwaddr bankd = rcd | (get_el_value(&info->bank, dest * sz));
+    hwaddr banks1 = rcs1 | (get_el_value(&info->bank, start1) * sz);
+    hwaddr banks2 = rcs2 | (get_el_value(&info->bank, start2) * sz);
+    hwaddr bankd = rcd | (get_el_value(&info->bank, dest) * sz);
     sz *= info->bank.size;
 
     hwaddr subs1 = banks1 | (get_el_value(&info->subarr, start1) * sz);
@@ -811,7 +812,7 @@ static void init_3_riscv_access_once(CPURISCVState *env, target_ulong src1,
                                      target_ulong src2,
                                      target_ulong dest, target_ulong size)
 {
-    if(env->rc_src_access.n_pages == 0) {
+    if(env->rc_dest_access.n_pages == 0) {
         env->rc_mmu_idx = cpu_mmu_index(env, false);
         env->rc_oi = make_memop_idx(MO_UB, env->rc_mmu_idx);
 
@@ -1341,7 +1342,7 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
                 g_assert(ttmp->row_parent == tmp);
                 // debug_printf("copying from %p till %p sz %lu\n", ttmp->host, (void *) ((uint64_t) ttmp->host + ttmp->size), ttmp->size);
                 memset(ttmp->host, MEMSET_BYTE, ttmp->size);
-                env->rc_src_access.pages[ttmp->page_parent].size -= ttmp->size;
+                env->rc_dest_access.pages[ttmp->page_parent].size -= ttmp->size;
             }
         }
 
@@ -1351,28 +1352,6 @@ static uint64_t perform_rci(CPURISCVState *env, row_data_list *rows,
 
     return delay_op;
 }
-
-#if 0
-// control commit on dec 10
-static uint64_t perform_rci_missed(CPURISCVState *env, uintptr_t curr_pc)
-{
-    uint64_t delay_op = 0;
-
-    /* rci_missed pages (the ones that have to be set manually) */
-    for (int i=0; i < n_rci_missed; i++) {
-        rci_stat.otherATOM += env->rc_src_access.pages[rci_missed[i]].size;
-        slow_down_by(env, env->rc_src_access.pages[rci_missed[i]].size);
-        delay_op += env->rc_src_access.pages[rci_missed[i]].size;
-
-        /* No luck, do it manually */
-        for (int j = 0; j < env->rc_src_access.pages[rci_missed[i]].size; j++) {
-            helper_ret_stb_mmu(env, env->rc_src_access.pages[rci_missed[i]].v_addr + j, MEMSET_BYTE, env->rc_oi, curr_pc);
-        }
-    }
-
-    return delay_op;
-}
-#endif
 
 #endif
 
