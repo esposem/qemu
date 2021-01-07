@@ -147,8 +147,8 @@ static inline hwaddr get_el_value(dram_element_info *el, hwaddr addr)
 static inline int parse_dram_el_bits(dram_element_info *el)
 {
     char *f, *p, *f1, *f2, *p1, *p2;
-    int sf, ef, sp, ep, shift_off;
-    uint32_t new_bits = 0;
+    int sf, ef, sp, ep;
+    uint64_t new_bits = 0, shift_off;
     f = strtok(NULL, "="); /* f1:f2 */
     p = strtok(NULL, "\n"); /* p1:p2 */
 
@@ -206,7 +206,7 @@ static inline int parse_dram_el_bits(dram_element_info *el)
 
         shift_off = MIN(sp, ep);
 
-        el->mask |= ((1 << new_bits) - 1) << shift_off;
+        el->mask |=  (uint64_t) ((1 << new_bits) - 1) << shift_off;
 
         shift_off -= MIN(sf, ef);
     } else {
@@ -232,13 +232,20 @@ update_values:
 
 static inline void check_mapping(const char *name, dram_element_info *el, hwaddr addr)
 {
+    hwaddr expected = (el->size-1);
+    hwaddr val = get_el_value(el, addr);
+    int ran_val = 1;
+    for(int i=0; i < DRAM_MAX_BIT_INTERLEAVING; i++){
+        if(el->rand_bits[i][0] > 0 && el->rand_bits[i][0] % 2 == 0)
+            expected ^= ran_val; // last bit is 0
+        ran_val = (ran_val << 1);
+    }
 
     printf("Checking %s...", name);
-    hwaddr val = get_el_value(el, addr);
-    if(val != (el->size-1)){
-        printf("\tVal %lx does not match with exp %lx\n", val, (el->size-1));
+    if(val != expected){
+        printf("\tVal %lx does not match with exp %lx\n", val, expected);
     }
-    g_assert(val == (el->size-1));
+    g_assert(val == expected);
     printf("OK\n");
 }
 
