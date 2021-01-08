@@ -370,6 +370,12 @@ static uint64_t fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr star
     bool same_sub = (subs == subd) && same_bank;
     bool same_row = (rows == rowd) && same_sub;
 
+    debug_printf("Chan src is %lx\n", chans);
+    debug_printf("Chan dest is %lx\n", chand);
+
+    debug_printf("Rank src is %lx\n", ranks);
+    debug_printf("Rank dest is %lx\n", rankd);
+
     debug_printf("Subarr src is %lx\n", subs);
     debug_printf("Subarr dest is %lx\n", subd);
 
