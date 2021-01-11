@@ -486,8 +486,8 @@ static uint64_t tri_fpm_psm_delay(CPURISCVState *env, target_ulong size, hwaddr 
         if (n_same_bank == 3) {
             // if 2 same bank same sub, 1 diff sub -> 2*PSM + 2*FPM
             debug_printf("2 same sub, 1 diff sub, same bank\n");
-            atomic_add(&stat->in_fpm, size/2);
-            atomic_add(&stat->in_psm, size/2);
+            atomic_add(&stat->in_fpm, size/3*2);
+            atomic_add(&stat->in_psm, size/3);
             // stat->in_fpm += size/2;
             // stat->in_psm += size/2;
         } else if (n_same_rc == 3) {
