@@ -3,7 +3,7 @@
 #define HW_DRAM_H
 
 #define DRAM_MAX_BIT_INTERLEAVING 5
-#define DRAM_MAX_BIT_XOR 4 // MUST be at least 2
+#define DRAM_MAX_BIT_XOR 8 // MUST be at least 2
 typedef struct dram_element_info {
     uint64_t mask;
     uint8_t bits[DRAM_MAX_BIT_INTERLEAVING];
@@ -235,6 +235,10 @@ static inline void check_mapping(const char *name, dram_element_info *el, hwaddr
     hwaddr expected = (el->size-1);
     hwaddr val = get_el_value(el, addr);
     int ran_val = 1;
+
+    if(el->size == 0)
+        return;
+
     for(int i=0; i < DRAM_MAX_BIT_INTERLEAVING; i++){
         if(el->rand_bits[i][0] > 0 && el->rand_bits[i][0] % 2 == 0)
             expected ^= ran_val; // last bit is 0
@@ -256,6 +260,12 @@ static inline void read_dram_info_file(dram_cpu_info *dram_info)
     char *op;
 
     memset(dram_info, 0, sizeof(dram_cpu_info));
+    dram_info->bank.size = 1;
+    dram_info->channel.size = 1;
+    dram_info->col.size = 1;
+    dram_info->row.size = 1;
+    dram_info->rank.size = 1;
+    dram_info->subarr.size = 1;
 
     fi = fopen("dram_struct.txt", "r");
     if(fi == NULL){
