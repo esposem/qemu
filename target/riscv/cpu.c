@@ -550,17 +550,19 @@ static void riscv_cpu_init(Object *obj)
     env->op_timer = timer_new_us(QEMU_CLOCK_VIRTUAL, dram_release_timer, env);
 
     // env->pages_in_row = cpu->dram_info.col.size / TARGET_PAGE_SIZE;
-    env->lsb_nocol = UINT64_MAX;
-    uint64_t lsb;
+    // env->lsb_nocol = UINT64_MAX;
+    // uint64_t lsb;
 
-    if((lsb = get_lsb(cpu->dram_info.channel.mask)) < env->lsb_nocol && lsb != 0)
-        env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.rank.mask)) < env->lsb_nocol && lsb != 0)
-        env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.bank.mask)) < env->lsb_nocol && lsb != 0)
-        env->lsb_nocol = lsb;
-    if((lsb = get_lsb(cpu->dram_info.row.mask)) < env->lsb_nocol && lsb != 0)
-        env->lsb_nocol = lsb;
+    env->lsb_nocol = get_lsb(~(cpu->dram_info.col.mask));
+
+    // if((lsb = get_lsb(cpu->dram_info.channel.mask)) < env->lsb_nocol && lsb != 0)
+    //     env->lsb_nocol = lsb;
+    // if((lsb = get_lsb(cpu->dram_info.rank.mask)) < env->lsb_nocol && lsb != 0)
+    //     env->lsb_nocol = lsb;
+    // if((lsb = get_lsb(cpu->dram_info.bank.mask)) < env->lsb_nocol && lsb != 0)
+    //     env->lsb_nocol = lsb;
+    // if((lsb = get_lsb(cpu->dram_info.row.mask)) < env->lsb_nocol && lsb != 0)
+    //     env->lsb_nocol = lsb;
 
     printf("LSB IS %lx\n", env->lsb_nocol);
 }

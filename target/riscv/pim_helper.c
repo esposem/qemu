@@ -130,6 +130,7 @@ static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
     // sizes *= info->channel.size;
 
     return tot;
+    // return ((phys & (info->size-1)) & ~(info->col.mask));
 }
 
 static hwaddr get_next_row(hwaddr phys, CPURISCVState *env)
@@ -172,7 +173,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
         while(start < end) {
             size_used = MIN(next, end) - start;
 
-            debug_printf("start %lx next %lx\n", start, next);
+            debug_printf("start %lx next %lx size %ld\n", start, next, size_used);
             prow = g_new0(partial_row, 1);
             prow->start = start;
             prow->size = size_used;
@@ -592,7 +593,7 @@ static void rec_iteration(int level, char **row, hwaddr phys, void *host,dram_cp
         uint64_t sz = MIN(info->part_row_end - off_phys + 1, *size);
         if(src_buff){ // copy from src to row
             memcpy(host, *row, sz);
-            // printf("copying from %lx till %lx sz %lu\n", phys,  phys + sz, sz);
+            debug_printf("copying from %lx till %lx sz %lu\n", phys,  phys + sz, sz);
         } else {
             memcpy(*row, host, sz);
         }
@@ -1497,6 +1498,16 @@ static void helper_src_destk(CPURISCVState *env, target_ulong src, target_ulong 
 
     offset_src = phys_src & info->col.mask;
     offset_dest = phys_dest & info->col.mask;
+    // printf("Given src phys %lx\n", phys_src);
+    // printf("Given dest phys %lx\n", phys_dest);
+
+    if(offset_src != 0){
+        printf("Offset src %lx\n", offset_src);
+    }
+    if(offset_dest != 0){
+        printf("Offset dest %lx\n", offset_dest);
+    }
+    
     g_assert(offset_src == 0);
     g_assert(offset_dest == 0);
 
