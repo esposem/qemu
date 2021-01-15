@@ -115,6 +115,7 @@ static void del_riscv_access(RISCVAccess *access)
 }
 
 // it's about the column so don't care about randomization
+// FIXME: this gets cut to 32 bits by the GLIB hash functions!!!
 static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
 {
     hwaddr sizes = 0;
@@ -122,8 +123,8 @@ static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
     sizes = info->bank.size;
     tot |= get_el_value(&info->row, phys) * sizes;
     sizes *= info->row.size;
-    tot |= get_el_value(&info->subarr, phys) * sizes;
-    sizes *= info->subarr.size;
+    // tot |= get_el_value(&info->subarr, phys) * sizes;
+    // sizes *= info->subarr.size;
     tot |= get_el_value(&info->rank, phys)* sizes;
     sizes *= info->rank.size;
     tot |= get_el_value(&info->channel, phys) * sizes;
@@ -152,7 +153,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
     partial_row *prow;
     row_data *row;
 
-    row_table = g_hash_table_new(g_int64_hash, g_int64_equal);
+    row_table = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
     QSIMPLEQ_INIT(row_list);
     QSIMPLEQ_INIT(partial_list);
 
@@ -182,10 +183,11 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
             QSIMPLEQ_INSERT_TAIL(partial_list, prow, next_partial);
 
             nocol = get_row_mask(start, info);
+            // printf("nocol %lx\n", nocol);
 
             /* search hash table by row index, but save addr as smallest addr within row. */
-            row = g_hash_table_lookup(row_table, &nocol);
-            debug_printf("Looking for row %lx in hashmap\n", nocol);
+            row = g_hash_table_lookup(row_table, GINT_TO_POINTER(nocol));
+            debug_printf("Looking for row %lx (%p) in hashmap\n", nocol, &nocol);
 
             /* build a linked list of rows, index them using hashmap
                but just temporarly */
@@ -196,7 +198,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
                 row->addr = start;
                 QSIMPLEQ_INSERT_TAIL(row_list, row, next_row);
                 QSIMPLEQ_INIT(&row->partial_list);
-                g_hash_table_insert(row_table, &nocol, row);
+                g_hash_table_insert(row_table, GINT_TO_POINTER(nocol), row);
             }
 
             prow->row_parent = row;
@@ -207,6 +209,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
             }
 
             row->usage += size_used;
+            g_assert(row->usage <= info->col.size);
 
             QSIMPLEQ_INSERT_TAIL(&row->partial_list, prow, next_same_row);
             row->partial_list_size++;
