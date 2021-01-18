@@ -120,14 +120,22 @@ static hwaddr get_row_mask(hwaddr phys, dram_cpu_info *info)
 {
     hwaddr sizes = 0;
     hwaddr tot = get_el_value(&info->bank, phys);
+    // printf("bank %ld\n", get_el_value(&info->bank, phys));
     sizes = info->bank.size;
-    tot |= get_el_value(&info->row, phys) * sizes;
+
+    tot |= (get_el_value(&info->row, phys) * sizes);
+    // printf("row %ld\n", get_el_value(&info->row, phys));
     sizes *= info->row.size;
+
     // tot |= get_el_value(&info->subarr, phys) * sizes;
     // sizes *= info->subarr.size;
-    tot |= get_el_value(&info->rank, phys)* sizes;
+
+    tot |= (get_el_value(&info->rank, phys) * sizes);
+    // printf("rank %ld\n", get_el_value(&info->rank, phys));
     sizes *= info->rank.size;
-    tot |= get_el_value(&info->channel, phys) * sizes;
+
+    tot |= (get_el_value(&info->channel, phys) * sizes);
+    // printf("chan %ld\n", get_el_value(&info->channel, phys));
     // sizes *= info->channel.size;
 
     return tot;
@@ -187,7 +195,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
 
             /* search hash table by row index, but save addr as smallest addr within row. */
             row = g_hash_table_lookup(row_table, GINT_TO_POINTER(nocol));
-            debug_printf("Looking for row %lx (%p) in hashmap\n", nocol, &nocol);
+            debug_printf("Looking for row %lx in hashmap\n", nocol);
 
             /* build a linked list of rows, index them using hashmap
                but just temporarly */
@@ -216,7 +224,7 @@ static void init_rowlist(CPURISCVState *env, dram_cpu_info *info,
 
             debug_printf("Partial row start %lx size %lu page %d row %lx(%lx)\n", prow->start, prow->size, prow->page_parent, nocol, row->addr);
 
-            debug_printf("Row %lx(%lx) usage %lu\n", nocol, row->addr, row->usage);
+            debug_printf("Row %lx(%lx) usage %lu\n\n", nocol, row->addr, row->usage);
 
             start = next;
             next = get_next_row(start, env);
